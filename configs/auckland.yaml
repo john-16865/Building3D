@@ -1,0 +1,23 @@
+solution:
+  id: auckland
+
+mapsindoors:
+  buildings_sync_url: https://api-us-east.mapsindoors.com/sync/buildings
+  venues_sync_url: https://api-us-east.mapsindoors.com/sync/venues
+  locations_url: https://api-us-east.mapsindoors.com/auckland/api/locations
+  building_details_url_template: https://api-us-east.mapsindoors.com/auckland/api/buildings/details/{building_id}?v=3
+  take: 1000
+
+paths:
+  raw_root: data/raw/auckland
+  processed_root: data/processed/auckland
+  export_root: exports/auckland
+
+generation:
+  default_floor_spacing: 4.2
+  basement_floor_spacing: 3.0
+  failure_policy: continue
+
+filters:
+  building_admin_ids: []
+  venue_ids: []

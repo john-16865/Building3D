@@ -1,0 +1,40 @@
+{
+  "name": "building3d",
+  "version": "1.0.0",
+  "description": "Standalone generator for turning University of Auckland MapsIndoors building data into GLB assets, per-building manifests, and campus-level indexes.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "gltf:inspect": "gltf-transform inspect",
+    "gltf:validate": "node tools/gltf_validate.mjs",
+    "gltf:unpack": "gltf-pipeline -i",
+    "gltf:pack": "gltfpack",
+    "viewer:three": "npm --prefix tools/vendor/three-gltf-viewer run dev",
+    "viewer:khronos": "npm --prefix tools/vendor/glTF-Sample-Viewer run dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/john-16865/Building3D.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/john-16865/Building3D/issues"
+  },
+  "homepage": "https://github.com/john-16865/Building3D#readme",
+  "devDependencies": {
+    "@babylonjs/viewer": "^9.8.0",
+    "@gltf-transform/cli": "^4.3.0",
+    "@google/model-viewer": "^4.2.0",
+    "assimpjs": "^0.0.10",
+    "gltf-pipeline": "^4.3.1",
+    "gltf-validator": "^2.0.0-dev.3.10",
+    "gltfpack": "^1.1.0",
+    "three": "^0.184.0"
+  }
+}

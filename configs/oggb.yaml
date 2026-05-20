@@ -1,0 +1,30 @@
+building:
+  id: oggb
+  admin_id: "260"
+  display_name: Sir Owen G Glenn Building OGGB
+  origin: [174.771359951698, -36.8529245870962]
+
+mapsindoors:
+  building_details_url: https://api-us-east.mapsindoors.com/auckland/api/buildings/details/b2fc3c66e2ca44a2b5c924f4?v=3
+  locations_url: https://api-us-east.mapsindoors.com/auckland/api/locations
+  take: 1000
+
+paths:
+  raw_dir: data/raw/oggb
+  processed_dir: data/processed/oggb
+  export_dir: exports/oggb
+
+floor_heights:
+  "-50": -15.0
+  "-40": -12.0
+  "-30": -9.0
+  "-20": -6.0
+  "-10": -3.0
+  "0": 0.0
+  "10": 4.2
+  "20": 8.4
+  "30": 12.6
+  "40": 16.8
+  "50": 21.0
+  "60": 25.2
+  "70": 29.4

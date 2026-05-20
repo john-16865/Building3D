@@ -1,0 +1,38 @@
+groups:
+  - id: engineering
+    display_name: Engineering
+    primary_member: "405"
+    members:
+      - "401"
+      - "402"
+      - "405"
+    aliases:
+      - engineering
+      - eng
+      - engineering building
+      - "401"
+      - "402"
+      - "402E"
+      - "403"
+      - "404"
+      - "405"
+
+  - id: science
+    display_name: Science Centre
+    primary_member: "302"
+    members:
+      - "301"
+      - "302"
+      - "303"
+      - "303S"
+      - "305"
+    aliases:
+      - science
+      - science centre
+      - faculty of science
+      - science building
+      - "301"
+      - "302"
+      - "303"
+      - "303S"
+      - "305"

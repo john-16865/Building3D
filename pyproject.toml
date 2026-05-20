@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "building3d"
+version = "0.1.0"
+description = "Standalone generator for turning MapsIndoors building data into GLB and manifest exports."
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6.0",
+  "requests>=2.31",
+  "Shapely>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+building3d = "building3d.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["building3d*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
