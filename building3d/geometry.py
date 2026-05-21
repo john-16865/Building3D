@@ -125,7 +125,7 @@ def navigation_meshes_from_meshes(meshes: list[MeshData]) -> list[MeshData]:
 def mesh_floor_name(name: str) -> str:
     if name.startswith("floor__"):
         floor_name = name[len("floor__") :]
-        return floor_name.split("__part_", 1)[0]
+        return floor_name.split("__", 1)[0]
     if "__floor_" in name:
         return name.rsplit("__floor_", 1)[1]
     return ""

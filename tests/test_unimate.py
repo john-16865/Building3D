@@ -119,6 +119,37 @@ def test_write_unimate_scene_uses_room_plate_navmesh_fallback_when_floor_slab_mi
     assert 'navigation_mesh = SubResource("NavigationMesh_floor_0")' in text
 
 
+def test_write_unimate_scene_adds_room_navigation_target_child(tmp_path):
+    manifest = {
+        "building": {"id": "science", "display_name": "Science Centre"},
+        "floors": [{"floor_index": 0, "floor_name": "G", "height": 0.0}],
+        "rooms": [
+            {
+                "external_id": "303-G16",
+                "node_name": "303 G16_Seminar Room",
+                "floor_index": 0,
+                "anchor": [10.0, 0.0, 10.0],
+                "navigation_anchor": [12.5, 0.0, 8.0],
+            }
+        ],
+        "portals": [],
+        "external_doors": [],
+    }
+    nav_meshes = [
+        build_floor_slab(
+            "floor__G",
+            [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 0.0, 20.0], [0.0, 0.0, 20.0], [0.0, 0.0, 0.0]],
+        )
+    ]
+
+    path = write_unimate_scene(manifest, tmp_path / "science_unimate.tscn", navigation_meshes=nav_meshes)
+    text = path.read_text(encoding="utf-8")
+
+    assert '[node name="303 G16_Seminar Room" type="Node3D" parent="Floors/Floor0/Rooms"]' in text
+    assert '[node name="NavTarget" type="Node3D" parent="Floors/Floor0/Rooms/303 G16_Seminar Room"]' in text
+    assert "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5, 0, -2)" in text
+
+
 def test_write_unimate_scene_snaps_external_doors_to_floor_navmesh(tmp_path):
     manifest = {
         "building": {"id": "science", "display_name": "Science Centre"},
@@ -205,7 +236,7 @@ def test_write_unimate_scene_assigns_unique_navigation_layer_per_floor(tmp_path)
     assert text.count("navigation_layers = 2") == 1
 
 
-def test_navigation_mesh_resources_add_connected_floor_hull_for_disconnected_plates():
+def test_navigation_mesh_resources_do_not_add_broad_floor_hull_for_disconnected_plates():
     floors = [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
     meshes = [
         build_room_plate(
@@ -223,7 +254,7 @@ def test_navigation_mesh_resources_add_connected_floor_hull_for_disconnected_pla
     resources = _navigation_mesh_resources(meshes, floors, {0})
 
     assert 0 in resources
-    assert any(len(polygon) > 3 for polygon in resources[0]["polygons"])
+    assert all(len(polygon) == 3 for polygon in resources[0]["polygons"])
 
 
 def test_navigation_mesh_resources_emit_godot_map_path_winding():

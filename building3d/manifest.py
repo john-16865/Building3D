@@ -103,22 +103,25 @@ def _hash_manifest(manifest: dict[str, Any]) -> str:
 
 
 def _nav_links(portals) -> list[dict[str, Any]]:
-    by_group: dict[tuple[str, str], list] = {}
+    by_group: dict[tuple[str, str, str], list] = {}
     for portal in portals:
         if portal.kind not in {"stair", "elevator"}:
             continue
-        by_group.setdefault((portal.kind, portal.group_id), []).append(portal)
+        by_group.setdefault(_portal_shaft_key(portal), []).append(portal)
 
     links: list[dict[str, Any]] = []
-    for (kind, group_id), grouped in by_group.items():
-        ordered = sorted(grouped, key=lambda portal: portal.floor_index)
+    for (kind, group_id, source_building_admin_id), grouped in by_group.items():
+        ordered = _one_portal_per_floor(grouped)
         for index in range(len(ordered) - 1):
             start = ordered[index]
             end = ordered[index + 1]
+            if start.floor_index == end.floor_index:
+                continue
             links.append(
                 {
                     "kind": kind,
                     "group_id": group_id,
+                    "source_building_admin_id": source_building_admin_id,
                     "from_external_id": start.external_id,
                     "to_external_id": end.external_id,
                     "from_source_id": start.source_id,
@@ -133,3 +136,38 @@ def _nav_links(portals) -> list[dict[str, Any]]:
                 }
             )
     return links
+
+
+def _portal_shaft_key(portal) -> tuple[str, str, str]:
+    source_building_admin_id = str(getattr(portal, "building_admin_id", "") or "").strip()
+    if not source_building_admin_id:
+        source_building_admin_id = _external_id_source_prefix(str(getattr(portal, "external_id", "") or ""))
+    return (
+        str(portal.kind),
+        str(portal.group_id),
+        source_building_admin_id,
+    )
+
+
+def _external_id_source_prefix(external_id: str) -> str:
+    if "-" in external_id:
+        return external_id.split("-", 1)[0].strip()
+    return external_id.strip()
+
+
+def _one_portal_per_floor(portals) -> list:
+    by_floor: dict[int, list] = {}
+    for portal in portals:
+        by_floor.setdefault(int(portal.floor_index), []).append(portal)
+    ordered = []
+    for _floor_index, grouped in sorted(by_floor.items()):
+        ordered.append(
+            sorted(
+                grouped,
+                key=lambda portal: (
+                    str(getattr(portal, "external_id", "")),
+                    str(getattr(portal, "source_id", "")),
+                ),
+            )[0]
+        )
+    return ordered

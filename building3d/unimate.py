@@ -159,13 +159,27 @@ def write_unimate_scene(
                 continue
             if should_snap:
                 anchor = _snap_anchor_to_navigation_mesh(anchor, nav_resource)
+            node_parent = f"{floor_parent}/Rooms"
+            node_path = f"{node_parent}/{_quote_attr(node_name)}"
             lines.extend(
                 [
                     "",
-                    f'[node name="{_quote_attr(node_name)}" type="Node3D" parent="{floor_parent}/Rooms"]',
+                    f'[node name="{_quote_attr(node_name)}" type="Node3D" parent="{node_parent}"]',
                     f"transform = {_transform(float(anchor[0]), 0.0, float(anchor[2]))}",
                 ]
             )
+            navigation_anchor = record.get("navigation_anchor")
+            if _valid_anchor(navigation_anchor):
+                offset_x = float(navigation_anchor[0]) - float(anchor[0])
+                offset_z = float(navigation_anchor[2]) - float(anchor[2])
+                if abs(offset_x) > 0.001 or abs(offset_z) > 0.001:
+                    lines.extend(
+                        [
+                            "",
+                            f'[node name="NavTarget" type="Node3D" parent="{node_path}"]',
+                            f"transform = {_transform(offset_x, 0.0, offset_z)}",
+                        ]
+                    )
         lines.extend(
             [
                 "",
@@ -294,8 +308,6 @@ def _navigation_mesh_resources(
             if fallback_resources.get(floor_index, {}).get("polygons"):
                 resources[floor_index] = fallback_resources[floor_index]
 
-    _add_connected_floor_hulls(resources, meshes, floor_index_by_name, floor_height_by_index, required_floor_indexes)
-
     still_missing = sorted(floor_index for floor_index in required_floor_indexes if not resources.get(floor_index, {}).get("polygons"))
     if still_missing:
         floor_labels = ", ".join(f"Floor {floor_index}" for floor_index in still_missing)
@@ -329,16 +341,21 @@ def _collect_navigation_resources(
             {"id": _navigation_mesh_id(floor_index), "vertices": [], "polygons": []},
         )
         floor_vertex_keys = vertex_keys.setdefault(floor_index, {})
-        for triangle in _top_surface_triangles(mesh):
+        top_faces = (
+            _top_surface_polygons(mesh)
+            if mesh.metadata.get("godot_nav_overlay") == "route_corridor_grid"
+            else _top_surface_triangles(mesh)
+        )
+        for face in top_faces:
             polygon = []
-            for source_index in triangle:
+            for source_index in face:
                 vertex = mesh.vertices[source_index]
                 local_vertex = _floor_local_vertex(vertex, floor_height, zero_y=True)
                 if local_vertex not in floor_vertex_keys:
                     floor_vertex_keys[local_vertex] = len(resource["vertices"])
                     resource["vertices"].append(list(local_vertex))
                 polygon.append(floor_vertex_keys[local_vertex])
-            if len(set(polygon)) == 3:
+            if len(set(polygon)) >= 3:
                 resource["polygons"].append(_godot_navigation_polygon(polygon, resource["vertices"]))
     return resources
 
@@ -542,6 +559,24 @@ def _top_surface_triangles(mesh: MeshData) -> list[list[int]]:
             continue
         triangles.extend(triangulate_faces([face], mesh.vertices))
     return triangles
+
+
+def _top_surface_polygons(mesh: MeshData) -> list[list[int]]:
+    if not mesh.vertices:
+        return []
+    top_y = max(float(vertex[1]) for vertex in mesh.vertices)
+    polygons: list[list[int]] = []
+    for face in mesh.faces:
+        face_vertices = [mesh.vertices[index] for index in face if 0 <= index < len(mesh.vertices)]
+        if len(face_vertices) < 3:
+            continue
+        y_values = [float(vertex[1]) for vertex in face_vertices]
+        if max(y_values) - min(y_values) > 0.0001:
+            continue
+        if abs(y_values[0] - top_y) > 0.0001:
+            continue
+        polygons.append(face)
+    return polygons
 
 
 def _snap_anchor_to_navigation_mesh(anchor: list[float], nav_resource: dict[str, Any] | None) -> list[float]:
