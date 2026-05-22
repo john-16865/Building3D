@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon, box
-from shapely.ops import nearest_points, unary_union
+from shapely.ops import linemerge, nearest_points, unary_union
+from shapely.strtree import STRtree
 
 from building3d.artifacts import artifact_names
 from building3d.batch import derive_building_config, load_inventory
@@ -16,6 +17,7 @@ from building3d.config import BuildingGroupConfig, SolutionConfig
 from building3d.discovery import BuildingInventoryRecord
 from building3d.geometry import (
     MeshData,
+    WallOpeningMap,
     dataset_meshes,
     floor_visual_meshes_from_meshes,
     localize_mesh_to_floor,
@@ -31,8 +33,8 @@ from building3d.projection import LocalProjector, project_dataset
 from building3d.unimate import write_unimate_scene
 
 
-ROUTE_NAV_CORRIDOR_RADIUS = 1.8
-ROUTE_NAV_POINT_RADIUS = 1.8
+ROUTE_NAV_CORRIDOR_RADIUS = 0.6
+ROUTE_NAV_POINT_RADIUS = 0.6
 ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE = 60.0
 ROUTE_NAV_POINT_CONNECTOR_NEIGHBORS = 3
 ROUTE_NAV_ROOM_PORTAL_CONNECTOR_NEIGHBORS = 3
@@ -41,12 +43,20 @@ ROUTE_NAV_COMPONENT_BRIDGE_MAX_DISTANCE = 125.0
 ROUTE_NAV_ANCHOR_ENVELOPE_CELL_SIZE = 20.0
 ROUTE_NAV_ANCHOR_ENVELOPE_MARGIN = 2.0
 ROUTE_NAV_ANCHOR_ENVELOPE_MIN_CELLS = 4
-ROUTE_NAV_GRID_CELL_SIZE = 1.0
+ROUTE_NAV_GRID_CELL_SIZE = 0.25
 ROUTE_NAV_GRID_MIN_CELL_COVERAGE = 0.02
 ROUTE_NAV_SIMPLIFY = 0.03
 ROUTE_NAV_TRIANGLE_MIN_AREA = 0.001
 ROUTE_NAV_FOOTPRINT_CLIP_MARGIN = 2.0
+ROUTE_NAV_FOOTPRINT_GAP_ROUTE_MAX_DISTANCE = 8.0
+ROUTE_NAV_FOOTPRINT_GAP_ROUTE_MAX_LENGTH = 25.0
+ROUTE_NAV_WALL_BLOCKER_CLEARANCE = 0.15
+ROUTE_NAV_WALL_INTERSECTION_TOLERANCE = 0.05
+ROUTE_NAV_TARGETED_POINT_CONNECTORS = {
+    frozenset(("303S-400E4", "305-400C1")),
+}
 ROUTE_DEBUG_CENTERLINE_WIDTH = 0.2
+ROUTE_CACHE_ENDPOINT_SCOPE_TOLERANCE = 3.0
 
 
 def generate_group(
@@ -82,16 +92,36 @@ def generate_group(
     processed_dir.mkdir(parents=True, exist_ok=True)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    meshes = dataset_meshes(projected)
-    manifest = _build_group_manifest(projected, group, member_records, processed_dir, export_dir)
-    floor_visual_files = _write_floor_visual_glbs(meshes, manifest.get("floors", []), export_dir, group.id)
+    door_openings = _load_room_door_points(processed_dir, export_dir, group)
+    meshes = dataset_meshes(projected, door_openings=door_openings)
+    wall_blockers_by_floor = _route_wall_blockers_by_floor(meshes)
+    manifest = _build_group_manifest(projected, group, member_records, processed_dir, export_dir, wall_blockers_by_floor=wall_blockers_by_floor)
     clip_footprints = _route_clip_footprints_by_floor(meshes, manifest.get("floors", []))
+    route_endpoint_scope = _route_endpoint_scope_records(manifest)
+    route_wall_openings = _route_wall_openings_from_cache(
+        export_dir / "door_route_cache",
+        manifest.get("floors", []),
+        origin_lon,
+        origin_lat,
+        clip_footprints_by_floor=clip_footprints,
+        route_endpoint_scope=route_endpoint_scope,
+        wall_blockers_by_floor=wall_blockers_by_floor,
+    )
+    if route_wall_openings:
+        meshes = dataset_meshes(projected, door_openings=door_openings, wall_openings_by_floor=route_wall_openings)
+        wall_blockers_by_floor = _route_wall_blockers_by_floor(meshes)
+        manifest = _build_group_manifest(projected, group, member_records, processed_dir, export_dir, wall_blockers_by_floor=wall_blockers_by_floor)
+        clip_footprints = _route_clip_footprints_by_floor(meshes, manifest.get("floors", []))
+        route_endpoint_scope = _route_endpoint_scope_records(manifest)
+    floor_visual_files = _write_floor_visual_glbs(meshes, manifest.get("floors", []), export_dir, group.id)
     route_navigation_meshes, route_nav_stats = _complete_route_navigation_meshes(
         export_dir / "door_route_cache",
         manifest,
         origin_lon,
         origin_lat,
         clip_footprints_by_floor=clip_footprints,
+        route_endpoint_scope=route_endpoint_scope,
+        wall_blockers_by_floor=wall_blockers_by_floor,
     )
     route_debug_meshes = _route_debug_centerline_meshes_from_cache(
         export_dir / "door_route_cache",
@@ -99,6 +129,7 @@ def generate_group(
         origin_lon,
         origin_lat,
         clip_footprints_by_floor=clip_footprints,
+        route_endpoint_scope=route_endpoint_scope,
     )
     floor_walkable_path_files = _write_floor_walkable_path_glbs(
         route_navigation_meshes,
@@ -115,6 +146,7 @@ def generate_group(
     )
     scene_navigation_meshes = route_navigation_meshes if route_navigation_meshes else meshes
     if route_nav_stats:
+        route_nav_stats["route_wall_openings"] = _route_wall_opening_stats(route_wall_openings)
         manifest.setdefault("nav", {})["validation"] = route_nav_stats
     manifest["assets"] = {
         "visual_glb": names.visual_glb,
@@ -398,6 +430,8 @@ def _build_group_manifest(
     records: list[BuildingInventoryRecord],
     processed_dir: Path,
     export_dir: Path,
+    *,
+    wall_blockers_by_floor: dict[str, list[LineString]] | None = None,
 ) -> dict[str, Any]:
     urls = []
     for record in records:
@@ -433,7 +467,7 @@ def _build_group_manifest(
     _apply_room_navigation_anchors(manifest, processed_dir, export_dir, group)
     _dedupe_node_names(manifest)
     _sync_nav_node_names(manifest)
-    _add_same_floor_walk_links(manifest)
+    _add_same_floor_walk_links(manifest, wall_blockers_by_floor=wall_blockers_by_floor)
     return refresh_generation_hash(manifest)
 
 
@@ -491,6 +525,8 @@ def _complete_route_navigation_meshes(
     origin_lat: float,
     *,
     clip_footprints_by_floor: dict[str, Any] | None = None,
+    route_endpoint_scope: list[dict[str, Any]] | None = None,
+    wall_blockers_by_floor: dict[str, list[LineString]] | None = None,
 ) -> tuple[list[MeshData], dict[str, Any]]:
     route_meshes, route_stats = _route_navigation_meshes_with_stats_from_cache(
         route_cache_dir,
@@ -500,6 +536,8 @@ def _complete_route_navigation_meshes(
         point_records=_route_navigation_point_records(manifest),
         walk_links=_route_navigation_walk_link_records(manifest),
         clip_footprints_by_floor=clip_footprints_by_floor,
+        route_endpoint_scope=route_endpoint_scope,
+        wall_blockers_by_floor=wall_blockers_by_floor,
     )
     if not route_meshes:
         return [], route_stats
@@ -521,6 +559,8 @@ def _route_navigation_meshes_from_cache(
     point_records: list[dict[str, Any]] | None = None,
     walk_links: list[dict[str, Any]] | None = None,
     clip_footprints_by_floor: dict[str, Any] | None = None,
+    route_endpoint_scope: list[dict[str, Any]] | None = None,
+    wall_blockers_by_floor: dict[str, list[LineString]] | None = None,
 ) -> list[MeshData]:
     meshes, _stats = _route_navigation_meshes_with_stats_from_cache(
         route_cache_dir,
@@ -531,6 +571,8 @@ def _route_navigation_meshes_from_cache(
         point_records=point_records,
         walk_links=walk_links,
         clip_footprints_by_floor=clip_footprints_by_floor,
+        route_endpoint_scope=route_endpoint_scope,
+        wall_blockers_by_floor=wall_blockers_by_floor,
     )
     return meshes
 
@@ -544,6 +586,7 @@ def _route_debug_centerline_meshes_from_cache(
     point_records: list[dict[str, Any]] | None = None,
     walk_links: list[dict[str, Any]] | None = None,
     clip_footprints_by_floor: dict[str, Any] | None = None,
+    route_endpoint_scope: list[dict[str, Any]] | None = None,
 ) -> list[MeshData]:
     del point_records, walk_links
     if not route_cache_dir.exists():
@@ -557,6 +600,7 @@ def _route_debug_centerline_meshes_from_cache(
         return []
 
     clip_footprints = _normalise_route_clip_footprints(clip_footprints_by_floor)
+    endpoint_scope = _normalise_route_endpoint_scope(route_endpoint_scope)
     projector = LocalProjector(origin_lon, origin_lat)
     lines_by_floor: dict[str, list[LineString]] = {floor_name: [] for floor_name in floor_height_by_name}
 
@@ -564,6 +608,8 @@ def _route_debug_centerline_meshes_from_cache(
         try:
             route_data = json.loads(route_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
+            continue
+        if not _route_matches_endpoint_scope(route_data, projector, floor_height_by_name, endpoint_scope):
             continue
         file_lines_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
         _collect_route_step_lines(route_data, projector, floor_height_by_name, file_lines_by_floor)
@@ -576,9 +622,17 @@ def _route_debug_centerline_meshes_from_cache(
     meshes: list[MeshData] = []
     for floor_name, lines in sorted(lines_by_floor.items(), key=lambda item: _floor_sort_key(item[0])):
         height = floor_height_by_name[floor_name]
-        for line_index, line in enumerate(lines, start=1):
+        for line_index, line in enumerate(_merge_route_debug_centerline_lines(lines), start=1):
             meshes.extend(_route_debug_centerline_meshes_for_line(floor_name, line, height, line_index))
     return meshes
+
+
+def _merge_route_debug_centerline_lines(lines: list[LineString]) -> list[LineString]:
+    valid_lines = [line for line in lines if isinstance(line, LineString) and line.length >= 0.05]
+    if len(valid_lines) <= 1:
+        return valid_lines
+    merged = linemerge(MultiLineString(valid_lines))
+    return [line for line in _route_line_strings_from_geometry(merged) if line.length >= 0.05]
 
 
 def _route_debug_centerline_meshes_for_line(
@@ -587,30 +641,28 @@ def _route_debug_centerline_meshes_for_line(
     height: float,
     line_index: int,
 ) -> list[MeshData]:
-    coords = list(line.coords)
     meshes: list[MeshData] = []
     half_width = ROUTE_DEBUG_CENTERLINE_WIDTH / 2.0
-    for segment_index, (start, end) in enumerate(zip(coords, coords[1:]), start=1):
-        start_x, start_z = float(start[0]), float(start[1])
-        end_x, end_z = float(end[0]), float(end[1])
-        dx = end_x - start_x
-        dz = end_z - start_z
-        length = math.hypot(dx, dz)
-        if length < 0.05:
+    if line.length < 0.05:
+        return meshes
+
+    buffered = line.buffer(half_width, cap_style="round", join_style="round", quad_segs=8).buffer(0)
+    for part_index, polygon in enumerate(_iter_route_polygons(buffered), start=1):
+        coords = list(polygon.exterior.coords)
+        if len(coords) < 4:
             continue
-        nx = -dz / length * half_width
-        nz = dx / length * half_width
+        suffix = "" if part_index == 1 else f"__part_{part_index}"
         vertices = [
-            [round(start_x + nx, 6), round(float(height), 6), round(start_z + nz, 6)],
-            [round(start_x - nx, 6), round(float(height), 6), round(start_z - nz, 6)],
-            [round(end_x - nx, 6), round(float(height), 6), round(end_z - nz, 6)],
-            [round(end_x + nx, 6), round(float(height), 6), round(end_z + nz, 6)],
+            [round(float(x), 6), round(float(height), 6), round(float(z), 6)]
+            for x, z in coords[:-1]
         ]
+        if len(vertices) < 3:
+            continue
         meshes.append(
             MeshData(
-                name=f"floor__{floor_name}__route_centerline_{line_index:04d}_{segment_index:02d}",
+                name=f"floor__{floor_name}__route_centerline_{line_index:04d}{suffix}",
                 vertices=vertices,
-                faces=[[0, 1, 2, 3]],
+                faces=[list(range(len(vertices)))],
                 material="route_centerline",
                 metadata={"debug_overlay": "route_centerline"},
             )
@@ -628,6 +680,8 @@ def _route_navigation_meshes_with_stats_from_cache(
     point_records: list[dict[str, Any]] | None = None,
     walk_links: list[dict[str, Any]] | None = None,
     clip_footprints_by_floor: dict[str, Any] | None = None,
+    route_endpoint_scope: list[dict[str, Any]] | None = None,
+    wall_blockers_by_floor: dict[str, list[LineString]] | None = None,
 ) -> tuple[list[MeshData], dict[str, Any]]:
     stats = _route_navigation_validation_stats()
     if not route_cache_dir.exists():
@@ -645,8 +699,11 @@ def _route_navigation_meshes_with_stats_from_cache(
         return [], stats
 
     clip_footprints = _normalise_route_clip_footprints(clip_footprints_by_floor)
+    wall_blocker_indexes = _route_wall_blocker_indexes(wall_blockers_by_floor or {})
     stats["clip_floor_count"] = len(clip_footprints)
     projector = LocalProjector(origin_lon, origin_lat)
+    endpoint_scope = _normalise_route_endpoint_scope(route_endpoint_scope)
+    stats["route_cache"]["endpoint_scope_count"] = len(endpoint_scope)
     geometries_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
     for route_path in sorted(route_cache_dir.glob("route_*.json")):
         stats["route_cache"]["files_total"] += 1
@@ -654,6 +711,10 @@ def _route_navigation_meshes_with_stats_from_cache(
             route_data = json.loads(route_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             stats["route_cache"]["files_rejected"] += 1
+            continue
+        if not _route_matches_endpoint_scope(route_data, projector, floor_height_by_name, endpoint_scope):
+            stats["route_cache"]["files_rejected"] += 1
+            stats["route_cache"]["files_out_of_scope"] += 1
             continue
         file_geometries_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
         _collect_route_step_lines(route_data, projector, floor_height_by_name, file_geometries_by_floor)
@@ -685,9 +746,11 @@ def _route_navigation_meshes_with_stats_from_cache(
                 continue
             stats["walk_links"]["segments_total"] += 1
             clipped_lines = _clip_route_line_to_floor(geometry, floor_name, clip_footprints)
-            if clipped_lines:
+            filtered_lines = _filter_route_lines_by_wall_blockers(clipped_lines, floor_name, wall_blocker_indexes)
+            stats["wall_filter"]["walk_links_rejected"] += len(clipped_lines) - len(filtered_lines)
+            if filtered_lines:
                 stats["walk_links"]["segments_used"] += 1
-                geometries_by_floor[floor_name].extend(clipped_lines)
+                geometries_by_floor[floor_name].extend(filtered_lines)
             else:
                 stats["walk_links"]["segments_rejected"] += 1
 
@@ -695,7 +758,6 @@ def _route_navigation_meshes_with_stats_from_cache(
         floor_name: any(isinstance(geometry, LineString) for geometry in geometries)
         for floor_name, geometries in geometries_by_floor.items()
     }
-
     point_records_by_floor: dict[str, list[dict[str, Any]]] = {floor_name: [] for floor_name in floor_height_by_name}
     for record in point_records or []:
         floor_name = _canonical_floor_name(str(record.get("floor_name", "")))
@@ -707,7 +769,14 @@ def _route_navigation_meshes_with_stats_from_cache(
         point_records_by_floor[floor_name].append(record)
         geometries_by_floor[floor_name].append(Point(float(anchor[0]), float(anchor[2])).buffer(ROUTE_NAV_POINT_RADIUS, quad_segs=8))
 
-    _append_route_navigation_connectors(geometries_by_floor, point_records_by_floor)
+    targeted_connector_lines_by_floor = _targeted_route_navigation_connector_lines(point_records_by_floor)
+
+    _append_route_navigation_connectors(
+        geometries_by_floor,
+        point_records_by_floor,
+        wall_blocker_indexes=wall_blocker_indexes,
+    )
+    final_clip_footprints = _route_gap_clip_footprints(clip_footprints, corridor_radius)
     if clip_footprints:
         geometries_by_floor = {
             floor_name: _clip_route_geometries_to_floor(geometries, floor_name, clip_footprints)
@@ -729,8 +798,10 @@ def _route_navigation_meshes_with_stats_from_cache(
             continue
         merged = unary_union(buffered)
         merged = _bridge_route_components(merged, corridor_radius)
-        if clip_footprints:
-            merged = _clip_route_geometry_to_floor(merged, floor_name, clip_footprints)
+        wall_blocker_index = wall_blocker_indexes.get(floor_name)
+        merged = _subtract_route_wall_blockers(merged, wall_blocker_index)
+        if final_clip_footprints:
+            merged = _clip_route_geometry_to_floor(merged, floor_name, final_clip_footprints)
             if merged.is_empty:
                 continue
         if ROUTE_NAV_SIMPLIFY:
@@ -744,13 +815,56 @@ def _route_navigation_meshes_with_stats_from_cache(
 
         floor_meshes: list[MeshData] = []
         for index, polygon in enumerate(_iter_route_polygons(merged), start=1):
-            mesh = _route_polygon_to_mesh(floor_name, polygon, height, index)
+            mesh = _route_polygon_to_mesh(floor_name, polygon, height, index, wall_blocker_index=wall_blocker_index)
             if not mesh.faces:
                 continue
             floor_meshes.append(mesh)
+        targeted_connector_lines = targeted_connector_lines_by_floor.get(floor_name, [])
+        for line_index, line in enumerate(targeted_connector_lines, start=len(floor_meshes) + 1):
+            targeted_connector = line.buffer(corridor_radius, cap_style="round", join_style="round", quad_segs=8).buffer(0)
+            if final_clip_footprints:
+                targeted_connector = _clip_route_geometry_to_floor(targeted_connector, floor_name, final_clip_footprints)
+            for polygon in _iter_route_polygons(targeted_connector):
+                mesh = _route_polygon_to_mesh(floor_name, polygon, height, line_index, wall_blocker_index=None)
+                if mesh.faces:
+                    floor_meshes.append(mesh)
         meshes.extend(floor_meshes)
     stats["navmesh_bboxes"] = _route_mesh_bboxes(meshes)
     return meshes, stats
+
+
+def _targeted_route_navigation_connector_lines(point_records_by_floor: dict[str, list[dict[str, Any]]]) -> dict[str, list[LineString]]:
+    lines_by_floor: dict[str, list[LineString]] = {}
+    for floor_name, records in point_records_by_floor.items():
+        records_by_external_id = {
+            str(record.get("external_id", "")): record
+            for record in records
+            if str(record.get("external_id", ""))
+        }
+        for connector in ROUTE_NAV_TARGETED_POINT_CONNECTORS:
+            if len(connector) != 2:
+                continue
+            start_id, end_id = sorted(connector)
+            start = records_by_external_id.get(start_id)
+            end = records_by_external_id.get(end_id)
+            if not start or not end:
+                continue
+            start_anchor = start.get("anchor")
+            end_anchor = end.get("anchor")
+            if not _valid_local_anchor(start_anchor) or not _valid_local_anchor(end_anchor):
+                continue
+            distance = _distance_2d(float(start_anchor[0]), float(start_anchor[2]), float(end_anchor[0]), float(end_anchor[2]))
+            if distance <= 0.05 or distance > ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE:
+                continue
+            lines_by_floor.setdefault(floor_name, []).append(
+                LineString(
+                    [
+                        (float(start_anchor[0]), float(start_anchor[2])),
+                        (float(end_anchor[0]), float(end_anchor[2])),
+                    ]
+                )
+            )
+    return lines_by_floor
 
 
 def _route_navigation_validation_stats() -> dict[str, Any]:
@@ -761,6 +875,8 @@ def _route_navigation_validation_stats() -> dict[str, Any]:
             "files_total": 0,
             "files_used": 0,
             "files_rejected": 0,
+            "files_out_of_scope": 0,
+            "endpoint_scope_count": 0,
             "segments_total": 0,
             "segments_used": 0,
             "segments_rejected": 0,
@@ -770,8 +886,207 @@ def _route_navigation_validation_stats() -> dict[str, Any]:
             "segments_used": 0,
             "segments_rejected": 0,
         },
+        "wall_filter": {
+            "route_segments_rejected": 0,
+            "walk_links_rejected": 0,
+        },
         "navmesh_bboxes": {},
     }
+
+
+def _route_wall_openings_from_cache(
+    route_cache_dir: Path,
+    floors: list[dict[str, Any]],
+    origin_lon: float,
+    origin_lat: float,
+    *,
+    clip_footprints_by_floor: dict[str, Any] | None = None,
+    route_endpoint_scope: list[dict[str, Any]] | None = None,
+    wall_blockers_by_floor: dict[str, list[LineString]] | None = None,
+) -> WallOpeningMap:
+    if not route_cache_dir.exists() or not wall_blockers_by_floor:
+        return {}
+
+    floor_height_by_name = {
+        _canonical_floor_name(str(floor.get("floor_name", ""))): float(floor.get("height", 0.0))
+        for floor in floors
+    }
+    if not floor_height_by_name:
+        return {}
+
+    clip_footprints = _normalise_route_clip_footprints(clip_footprints_by_floor)
+    endpoint_scope = _normalise_route_endpoint_scope(route_endpoint_scope)
+    wall_blocker_indexes = _route_wall_blocker_indexes(wall_blockers_by_floor)
+    if not wall_blocker_indexes:
+        return {}
+
+    projector = LocalProjector(origin_lon, origin_lat)
+    openings: WallOpeningMap = {}
+    for route_path in sorted(route_cache_dir.glob("route_*.json")):
+        try:
+            route_data = json.loads(route_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not _route_matches_endpoint_scope(route_data, projector, floor_height_by_name, endpoint_scope):
+            continue
+        file_geometries_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
+        _collect_route_step_lines(route_data, projector, floor_height_by_name, file_geometries_by_floor)
+        for floor_name, geometries in file_geometries_by_floor.items():
+            wall_blocker_index = wall_blocker_indexes.get(floor_name)
+            if wall_blocker_index is None:
+                continue
+            for geometry in geometries:
+                if not isinstance(geometry, LineString):
+                    continue
+                for line in _clip_route_line_to_floor(geometry, floor_name, clip_footprints):
+                    _add_route_wall_openings_for_line(openings, floor_name, line, wall_blocker_index)
+    return openings
+
+
+def _add_route_wall_openings_for_line(
+    openings: WallOpeningMap,
+    floor_name: str,
+    line: LineString,
+    wall_blocker_index: tuple[Any, list[LineString]],
+) -> None:
+    if line.is_empty:
+        return
+    for blocker in _query_wall_blockers(wall_blocker_index, line):
+        if not _line_hits_wall_interior(line, blocker):
+            continue
+        edge_key = _route_wall_opening_edge_key(blocker)
+        if edge_key is not None:
+            openings.setdefault(_canonical_floor_name(floor_name), set()).add(edge_key)
+
+
+def _route_wall_opening_edge_key(line: LineString) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return None
+    left = coords[0]
+    right = coords[-1]
+    a = (round(float(left[0]), 3), round(float(left[1]), 3))
+    b = (round(float(right[0]), 3), round(float(right[1]), 3))
+    return (a, b) if a <= b else (b, a)
+
+
+def _route_wall_opening_stats(openings: WallOpeningMap) -> dict[str, Any]:
+    return {
+        "floors": {floor_name: len(edge_keys) for floor_name, edge_keys in sorted(openings.items())},
+        "total_edges": sum(len(edge_keys) for edge_keys in openings.values()),
+    }
+
+
+def _route_endpoint_scope_records(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for collection_name in ("rooms", "portals", "external_doors"):
+        for item in manifest.get(collection_name, []):
+            if not isinstance(item, dict):
+                continue
+            anchor = item.get("anchor") or item.get("local")
+            if not _valid_local_anchor(anchor):
+                continue
+            floor_name = _canonical_floor_name(str(item.get("floor_name", "")))
+            if not floor_name:
+                continue
+            records.append({"floor_name": floor_name, "anchor": list(anchor[:3])})
+    return records
+
+
+def _normalise_route_endpoint_scope(route_endpoint_scope: list[dict[str, Any]] | None) -> list[tuple[str, float, float]]:
+    scope: list[tuple[str, float, float]] = []
+    for item in route_endpoint_scope or []:
+        if not isinstance(item, dict):
+            continue
+        anchor = item.get("anchor") or item.get("local")
+        if not _valid_local_anchor(anchor):
+            continue
+        floor_name = _canonical_floor_name(str(item.get("floor_name", "")))
+        if not floor_name:
+            continue
+        scope.append((floor_name, float(anchor[0]), float(anchor[2])))
+    return scope
+
+
+def _route_matches_endpoint_scope(
+    route_data: dict[str, Any],
+    projector: LocalProjector,
+    floor_height_by_name: dict[str, float],
+    endpoint_scope: list[tuple[str, float, float]],
+) -> bool:
+    if not endpoint_scope:
+        return True
+    for route in route_data.get("routes") or []:
+        if not isinstance(route, dict):
+            continue
+        for endpoint in _route_overall_endpoint_points(route, projector, floor_height_by_name):
+            if _route_endpoint_matches_scope(endpoint, endpoint_scope):
+                return True
+    return False
+
+
+def _route_overall_endpoint_points(
+    route: dict[str, Any],
+    projector: LocalProjector,
+    floor_height_by_name: dict[str, float],
+) -> list[tuple[str, float, float]]:
+    legs = [leg for leg in route.get("legs") or [] if isinstance(leg, dict)]
+    raw_points: list[Any] = []
+    if legs:
+        raw_points.extend([legs[0].get("start_location"), legs[-1].get("end_location")])
+
+    points: list[tuple[str, float, float]] = []
+    for raw_point in raw_points:
+        point = _route_location_local_point(raw_point, projector, floor_height_by_name)
+        if point is not None:
+            points.append(point)
+    if points or any(isinstance(raw_point, dict) for raw_point in raw_points):
+        return points
+
+    geometry_points: list[Any] = []
+    search_steps: list[Any] = []
+    if legs:
+        for leg in legs:
+            search_steps.extend(leg.get("steps") or [])
+    else:
+        search_steps.extend(route.get("steps") or [])
+    for step in search_steps:
+        if isinstance(step, dict):
+            geometry_points.extend(step.get("geometry") or [])
+    for raw_point in ([geometry_points[0], geometry_points[-1]] if geometry_points else []):
+        point = _route_location_local_point(raw_point, projector, floor_height_by_name)
+        if point is not None:
+            points.append(point)
+    return points
+
+
+def _route_location_local_point(
+    point: Any,
+    projector: LocalProjector,
+    floor_height_by_name: dict[str, float],
+) -> tuple[str, float, float] | None:
+    if not isinstance(point, dict):
+        return None
+    floor_name = _route_floor_name(point.get("floor_name"))
+    if floor_name not in floor_height_by_name:
+        return None
+    if "lat" not in point or "lng" not in point:
+        return None
+    local = projector.to_local(float(point["lng"]), float(point["lat"]), floor_height_by_name[floor_name])
+    return (floor_name, float(local[0]), float(local[2]))
+
+
+def _route_endpoint_matches_scope(
+    endpoint: tuple[str, float, float],
+    endpoint_scope: list[tuple[str, float, float]],
+) -> bool:
+    endpoint_floor, endpoint_x, endpoint_z = endpoint
+    for scope_floor, scope_x, scope_z in endpoint_scope:
+        if endpoint_floor != scope_floor:
+            continue
+        if _distance_2d(endpoint_x, endpoint_z, scope_x, scope_z) <= ROUTE_CACHE_ENDPOINT_SCOPE_TOLERANCE:
+            return True
+    return False
 
 
 def _normalise_route_clip_footprints(clip_footprints_by_floor: dict[str, Any] | None) -> dict[str, Any]:
@@ -796,7 +1111,20 @@ def _clip_route_line_to_floor(line: LineString, floor_name: str, clip_footprints
     footprint = clip_footprints_by_floor.get(_canonical_floor_name(floor_name))
     if footprint is None:
         return [line] if not line.is_empty and line.length >= 0.05 else []
+    if _route_line_bridges_footprint_gap(line, footprint):
+        return [line]
     return _route_line_strings_from_geometry(line.intersection(footprint))
+
+
+def _route_line_bridges_footprint_gap(line: LineString, footprint: Any) -> bool:
+    if line.is_empty or line.length < 0.05 or line.length > ROUTE_NAV_FOOTPRINT_GAP_ROUTE_MAX_LENGTH:
+        return False
+    if footprint is None or getattr(footprint, "is_empty", True):
+        return False
+    try:
+        return line.distance(footprint) <= ROUTE_NAV_FOOTPRINT_GAP_ROUTE_MAX_DISTANCE
+    except Exception:
+        return False
 
 
 def _clip_route_geometries_to_floor(
@@ -805,12 +1133,24 @@ def _clip_route_geometries_to_floor(
     clip_footprints_by_floor: dict[str, Any],
 ) -> list[Any]:
     clipped: list[Any] = []
+    footprint = clip_footprints_by_floor.get(_canonical_floor_name(floor_name)) if clip_footprints_by_floor else None
     for geometry in geometries:
+        if isinstance(geometry, LineString) and _route_line_bridges_footprint_gap(geometry, footprint):
+            clipped.append(geometry)
+            continue
         clipped_geometry = _clip_route_geometry_to_floor(geometry, floor_name, clip_footprints_by_floor)
         if clipped_geometry.is_empty:
             continue
-        if isinstance(clipped_geometry, GeometryCollection):
-            clipped.extend(geometry for geometry in clipped_geometry.geoms if not geometry.is_empty)
+        if isinstance(clipped_geometry, LineString | MultiLineString):
+            clipped.extend(_route_line_strings_from_geometry(clipped_geometry))
+        elif isinstance(clipped_geometry, GeometryCollection):
+            for child in clipped_geometry.geoms:
+                if child.is_empty:
+                    continue
+                if isinstance(child, LineString | MultiLineString):
+                    clipped.extend(_route_line_strings_from_geometry(child))
+                else:
+                    clipped.append(child)
         else:
             clipped.append(clipped_geometry)
     return clipped
@@ -828,6 +1168,20 @@ def _clip_route_geometry_to_floor(geometry: Any, floor_name: str, clip_footprint
         return GeometryCollection()
 
 
+def _route_gap_clip_footprints(clip_footprints_by_floor: dict[str, Any], corridor_radius: float) -> dict[str, Any]:
+    if not clip_footprints_by_floor:
+        return {}
+    margin = ROUTE_NAV_FOOTPRINT_GAP_ROUTE_MAX_DISTANCE + corridor_radius
+    footprints: dict[str, Any] = {}
+    for floor_name, footprint in clip_footprints_by_floor.items():
+        if footprint is None or getattr(footprint, "is_empty", True):
+            continue
+        expanded = footprint.buffer(margin, join_style="mitre").buffer(0)
+        if not expanded.is_empty:
+            footprints[floor_name] = expanded
+    return footprints
+
+
 def _route_line_strings_from_geometry(geometry: Any) -> list[LineString]:
     if geometry is None or geometry.is_empty:
         return []
@@ -839,6 +1193,81 @@ def _route_line_strings_from_geometry(geometry: Any) -> list[LineString]:
             lines.extend(_route_line_strings_from_geometry(child))
         return lines
     return []
+
+
+def _filter_route_lines_by_wall_blockers(
+    lines: list[LineString],
+    floor_name: str,
+    wall_blocker_indexes: dict[str, tuple[Any, list[LineString]]],
+) -> list[LineString]:
+    wall_blocker_index = wall_blocker_indexes.get(_canonical_floor_name(floor_name))
+    if wall_blocker_index is None:
+        return lines
+    return [line for line in lines if not _line_blocked_by_wall(line, wall_blocker_index)]
+
+
+def _line_blocked_by_wall(line: LineString, wall_blocker_index: tuple[Any, list[LineString]] | None) -> bool:
+    if wall_blocker_index is None or line.is_empty:
+        return False
+    for blocker in _query_wall_blockers(wall_blocker_index, line):
+        if _line_hits_wall_interior(line, blocker):
+            return True
+    return False
+
+
+def _line_hits_wall_interior(line: LineString, wall: LineString) -> bool:
+    if wall.is_empty or line.is_empty:
+        return False
+    if line.crosses(wall) or wall.crosses(line):
+        return True
+    intersection = line.intersection(wall)
+    return _wall_intersection_is_blocking(intersection, line, wall)
+
+
+def _wall_intersection_is_blocking(intersection: Any, line: LineString, wall: LineString) -> bool:
+    if intersection is None or intersection.is_empty:
+        return False
+    geom_type = getattr(intersection, "geom_type", "")
+    if geom_type == "Point":
+        return (
+            ROUTE_NAV_WALL_INTERSECTION_TOLERANCE
+            < line.project(intersection)
+            < line.length - ROUTE_NAV_WALL_INTERSECTION_TOLERANCE
+            and ROUTE_NAV_WALL_INTERSECTION_TOLERANCE
+            < wall.project(intersection)
+            < wall.length - ROUTE_NAV_WALL_INTERSECTION_TOLERANCE
+        )
+    if geom_type == "MultiPoint":
+        return any(_wall_intersection_is_blocking(point, line, wall) for point in intersection.geoms)
+    if geom_type in {"LineString", "MultiLineString"}:
+        return intersection.length > ROUTE_NAV_WALL_INTERSECTION_TOLERANCE
+    if isinstance(intersection, GeometryCollection):
+        return any(_wall_intersection_is_blocking(child, line, wall) for child in intersection.geoms)
+    return False
+
+
+def _subtract_route_wall_blockers(geometry: Any, wall_blocker_index: tuple[Any, list[LineString]] | None) -> Any:
+    if wall_blocker_index is None or geometry is None or getattr(geometry, "is_empty", True):
+        return geometry
+    blockers = _query_wall_blockers(wall_blocker_index, geometry)
+    if not blockers:
+        return geometry
+    wall_cut = unary_union(blockers).buffer(ROUTE_NAV_WALL_BLOCKER_CLEARANCE, cap_style="flat", join_style="mitre")
+    if wall_cut.is_empty:
+        return geometry
+    try:
+        return geometry.difference(wall_cut).buffer(0)
+    except Exception:
+        return geometry
+
+
+def _route_grid_cell_blocked_by_wall(cell: Polygon, wall_blocker_index: tuple[Any, list[LineString]] | None) -> bool:
+    if wall_blocker_index is None:
+        return False
+    for blocker in _query_wall_blockers(wall_blocker_index, cell):
+        if cell.intersects(blocker):
+            return True
+    return False
 
 
 def _point_inside_route_clip(x: float, z: float, floor_name: str, clip_footprints_by_floor: dict[str, Any]) -> bool:
@@ -867,7 +1296,14 @@ def _route_mesh_bboxes(meshes: list[MeshData]) -> dict[str, list[float]]:
     return {floor_name: [round(value, 6) for value in bbox] for floor_name, bbox in sorted(bboxes.items())}
 
 
-def _route_polygon_to_mesh(floor_name: str, polygon: Polygon, height: float, index: int) -> MeshData:
+def _route_polygon_to_mesh(
+    floor_name: str,
+    polygon: Polygon,
+    height: float,
+    index: int,
+    *,
+    wall_blocker_index: tuple[Any, list[LineString]] | None = None,
+) -> MeshData:
     """Convert a route corridor polygon into edge-connected grid cells."""
     suffix = "" if index == 1 else f"__part_{index}"
     vertices: list[list[float]] = []
@@ -904,6 +1340,8 @@ def _route_polygon_to_mesh(floor_name: str, polygon: Polygon, height: float, ind
             x0 = start_x + x_index * cell_size
             x1 = x0 + cell_size
             cell = box(x0, z0, x1, z1)
+            if _route_grid_cell_blocked_by_wall(cell, wall_blocker_index):
+                continue
             covered_area = coverage_polygon.intersection(cell).area
             if covered_area < min_cell_area:
                 continue
@@ -1141,12 +1579,31 @@ def _collect_route_step_lines(
                 if abutters and abutters != "InsideBuilding":
                     continue
                 points = _route_step_local_points(step, leg, projector, floor_height_by_name)
-                for start, end in zip(points, points[1:]):
-                    if start[0] != end[0]:
-                        continue
-                    if _distance_2d(start[1], start[2], end[1], end[2]) < 0.05:
-                        continue
-                    geometries_by_floor[start[0]].append(LineString([(start[1], start[2]), (end[1], end[2])]))
+                _append_same_floor_route_runs(points, geometries_by_floor)
+
+
+def _append_same_floor_route_runs(
+    points: list[tuple[str, float, float]],
+    geometries_by_floor: dict[str, list[Any]],
+) -> None:
+    current_floor = ""
+    current_coords: list[tuple[float, float]] = []
+
+    def flush() -> None:
+        if current_floor and len(current_coords) >= 2:
+            geometries_by_floor[current_floor].append(LineString(current_coords))
+
+    for floor_name, x, z in points:
+        coord = (float(x), float(z))
+        if floor_name != current_floor:
+            flush()
+            current_floor = floor_name
+            current_coords = [coord]
+            continue
+        if current_coords and _distance_2d(current_coords[-1][0], current_coords[-1][1], coord[0], coord[1]) < 0.05:
+            continue
+        current_coords.append(coord)
+    flush()
 
 
 def _collect_manifest_walk_link_lines(
@@ -1278,7 +1735,10 @@ def _route_navigation_walk_link_records(manifest: dict[str, Any]) -> list[dict[s
 def _append_route_navigation_connectors(
     geometries_by_floor: dict[str, list[Any]],
     point_records_by_floor: dict[str, list[dict[str, Any]]],
+    *,
+    wall_blocker_indexes: dict[str, tuple[Any, list[LineString]]] | None = None,
 ) -> None:
+    wall_blocker_indexes = wall_blocker_indexes or {}
     for floor_name, records in point_records_by_floor.items():
         if not records:
             continue
@@ -1294,6 +1754,7 @@ def _append_route_navigation_connectors(
         if not record_points:
             continue
 
+        wall_blocker_index = wall_blocker_indexes.get(_canonical_floor_name(floor_name))
         seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
         route_lines = [geometry for geometry in geometries if isinstance(geometry, LineString)]
         for _record, point in record_points:
@@ -1301,14 +1762,14 @@ def _append_route_navigation_connectors(
                 continue
             nearest_line = min(route_lines, key=lambda line: line.distance(point))
             nearest_point = nearest_line.interpolate(nearest_line.project(point))
-            _append_connector_line(geometries, seen, point, nearest_point, ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE)
+            _append_connector_line(geometries, seen, point, nearest_point, ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE, wall_blocker_index=wall_blocker_index)
         if route_lines:
             continue
 
-        _append_nearest_point_connectors(geometries, seen, record_points, ROUTE_NAV_POINT_CONNECTOR_NEIGHBORS)
+        _append_nearest_point_connectors(geometries, seen, record_points, ROUTE_NAV_POINT_CONNECTOR_NEIGHBORS, wall_blocker_index=wall_blocker_index)
         portal_points = [(record, point) for record, point in record_points if _is_portal_point_record(record)]
         if portal_points:
-            _append_nearest_portal_connectors(geometries, seen, record_points, portal_points)
+            _append_nearest_portal_connectors(geometries, seen, record_points, portal_points, wall_blocker_index=wall_blocker_index)
 
 
 def _append_nearest_point_connectors(
@@ -1316,6 +1777,8 @@ def _append_nearest_point_connectors(
     seen: set[tuple[tuple[float, float], tuple[float, float]]],
     record_points: list[tuple[dict[str, Any], Point]],
     neighbor_count: int,
+    *,
+    wall_blocker_index: tuple[Any, list[LineString]] | None = None,
 ) -> None:
     for start_index, (_record, point) in enumerate(record_points):
         candidates: list[tuple[float, int, Point]] = []
@@ -1326,7 +1789,7 @@ def _append_nearest_point_connectors(
             if 0.05 < distance <= ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE:
                 candidates.append((distance, end_index, other))
         for _distance, _end_index, other in sorted(candidates, key=lambda item: (item[0], item[1]))[:neighbor_count]:
-            _append_connector_line(geometries, seen, point, other, ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE)
+            _append_connector_line(geometries, seen, point, other, ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE, wall_blocker_index=wall_blocker_index)
 
 
 def _append_nearest_portal_connectors(
@@ -1334,6 +1797,8 @@ def _append_nearest_portal_connectors(
     seen: set[tuple[tuple[float, float], tuple[float, float]]],
     record_points: list[tuple[dict[str, Any], Point]],
     portal_points: list[tuple[dict[str, Any], Point]],
+    *,
+    wall_blocker_index: tuple[Any, list[LineString]] | None = None,
 ) -> None:
     for record, point in record_points:
         candidates: list[tuple[float, str, Point]] = []
@@ -1349,7 +1814,7 @@ def _append_nearest_portal_connectors(
             else ROUTE_NAV_ROOM_PORTAL_CONNECTOR_NEIGHBORS
         )
         for _distance, _key, portal_point in sorted(candidates, key=lambda item: (item[0], item[1]))[:neighbor_count]:
-            _append_connector_line(geometries, seen, point, portal_point, ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE)
+            _append_connector_line(geometries, seen, point, portal_point, ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE, wall_blocker_index=wall_blocker_index)
 
 
 def _append_connector_line(
@@ -1358,15 +1823,21 @@ def _append_connector_line(
     start: Point,
     end: Point,
     max_distance: float,
-) -> None:
+    *,
+    wall_blocker_index: tuple[Any, list[LineString]] | None = None,
+) -> bool:
     distance = start.distance(end)
     if distance <= 0.05 or distance > max_distance:
-        return
+        return False
     key = tuple(sorted((_point_key(start), _point_key(end))))  # type: ignore[assignment]
     if key in seen:
-        return
+        return False
+    line = LineString([(float(start.x), float(start.y)), (float(end.x), float(end.y))])
+    if _line_blocked_by_wall(line, wall_blocker_index):
+        return False
     seen.add(key)
-    geometries.append(LineString([(float(start.x), float(start.y)), (float(end.x), float(end.y))]))
+    geometries.append(line)
+    return True
 
 
 def _point_from_anchor(anchor: Any) -> Point | None:
@@ -1383,11 +1854,16 @@ def _is_portal_point_record(record: dict[str, Any]) -> bool:
     return str(record.get("kind", "")).lower() in {"stair", "elevator", "door", "portal"}
 
 
-def _add_same_floor_walk_links(manifest: dict[str, Any]) -> None:
+def _add_same_floor_walk_links(
+    manifest: dict[str, Any],
+    *,
+    wall_blockers_by_floor: dict[str, list[LineString]] | None = None,
+) -> None:
     nav = manifest.setdefault("nav", {})
     links = nav.setdefault("links", [])
     if not isinstance(links, list):
         return
+    wall_blocker_indexes = _route_wall_blocker_indexes(wall_blockers_by_floor or {})
 
     existing = {
         (
@@ -1410,6 +1886,9 @@ def _add_same_floor_walk_links(manifest: dict[str, Any]) -> None:
 
     for floor_index, records in sorted(records_by_floor.items()):
         for start, end in _nearest_point_record_pairs(records):
+            floor_name = _canonical_floor_name(str(start.get("floor_name") or end.get("floor_name") or ""))
+            if _anchors_cross_wall(start.get("anchor"), end.get("anchor"), wall_blocker_indexes.get(floor_name)):
+                continue
             from_key = _record_link_key(start)
             to_key = _record_link_key(end)
             link_key = ("walk", from_key, to_key, floor_index, floor_index)
@@ -1435,6 +1914,13 @@ def _add_same_floor_walk_links(manifest: dict[str, Any]) -> None:
                     "bidirectional": True,
                 }
             )
+
+
+def _anchors_cross_wall(start: Any, end: Any, wall_blocker_index: tuple[Any, list[LineString]] | None) -> bool:
+    if not _valid_local_anchor(start) or not _valid_local_anchor(end):
+        return False
+    line = LineString([(float(start[0]), float(start[2])), (float(end[0]), float(end[2]))])
+    return _line_blocked_by_wall(line, wall_blocker_index)
 
 
 def _nearest_point_record_pairs(records: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
@@ -1762,6 +2248,58 @@ def _mesh_top_footprint_polygons(mesh: MeshData) -> list[Polygon]:
         if not polygon.is_empty and polygon.area > 0.01:
             polygons.append(polygon)
     return polygons
+
+
+def _route_wall_blockers_by_floor(meshes: list[MeshData]) -> dict[str, list[LineString]]:
+    blockers: dict[str, list[LineString]] = {}
+    for mesh in meshes:
+        if mesh.material != "wall_low":
+            continue
+        floor_name = _canonical_floor_name(mesh_floor_name(mesh.name))
+        if not floor_name:
+            continue
+        for face in mesh.faces:
+            line = _wall_face_line(mesh, face)
+            if line is not None:
+                blockers.setdefault(floor_name, []).append(line)
+    return blockers
+
+
+def _wall_face_line(mesh: MeshData, face: list[int]) -> LineString | None:
+    points: list[tuple[float, float]] = []
+    for index in face:
+        if not 0 <= index < len(mesh.vertices):
+            continue
+        vertex = mesh.vertices[index]
+        point = (round(float(vertex[0]), 6), round(float(vertex[2]), 6))
+        if point not in points:
+            points.append(point)
+    if len(points) != 2:
+        return None
+    line = LineString(points)
+    return line if line.length >= 0.05 else None
+
+
+def _route_wall_blocker_indexes(
+    wall_blockers_by_floor: dict[str, list[LineString]],
+) -> dict[str, tuple[Any, list[LineString]]]:
+    indexes: dict[str, tuple[Any, list[LineString]]] = {}
+    for floor_name, blockers in wall_blockers_by_floor.items():
+        valid = [blocker for blocker in blockers if isinstance(blocker, LineString) and not blocker.is_empty and blocker.length >= 0.05]
+        if valid:
+            indexes[_canonical_floor_name(floor_name)] = (STRtree(valid), valid)
+    return indexes
+
+
+def _query_wall_blockers(wall_blocker_index: tuple[Any, list[LineString]], geometry: Any) -> list[LineString]:
+    tree, blockers = wall_blocker_index
+    matches = list(tree.query(geometry))
+    if not matches:
+        return []
+    first = matches[0]
+    if hasattr(first, "geom_type"):
+        return [match for match in matches if isinstance(match, LineString)]
+    return [blockers[int(index)] for index in matches]
 
 
 def _unimate_asset_base(group: BuildingGroupConfig) -> str:
