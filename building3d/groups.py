@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import nearest_points, unary_union
 
 from building3d.artifacts import artifact_names
@@ -18,6 +18,8 @@ from building3d.geometry import (
     MeshData,
     dataset_meshes,
     floor_visual_meshes_from_meshes,
+    localize_mesh_to_floor,
+    mesh_floor_name,
     navigation_meshes_from_meshes,
     visual_meshes_from_meshes,
 )
@@ -43,6 +45,8 @@ ROUTE_NAV_GRID_CELL_SIZE = 1.0
 ROUTE_NAV_GRID_MIN_CELL_COVERAGE = 0.02
 ROUTE_NAV_SIMPLIFY = 0.03
 ROUTE_NAV_TRIANGLE_MIN_AREA = 0.001
+ROUTE_NAV_FOOTPRINT_CLIP_MARGIN = 2.0
+ROUTE_DEBUG_CENTERLINE_WIDTH = 0.2
 
 
 def generate_group(
@@ -51,8 +55,12 @@ def generate_group(
     *,
     records: list[BuildingInventoryRecord] | None = None,
     fetch_missing: bool = True,
+    only_members: list[str] | None = None,
+    only_floors: list[str] | None = None,
 ) -> dict[str, Any]:
     records = records or load_inventory(solution_config)
+    if only_members:
+        group = _filter_group_members(group, only_members)
     member_records = _member_records(group, records)
     if len(member_records) != len(group.members):
         found = {record.admin_id for record in member_records}
@@ -61,7 +69,10 @@ def generate_group(
 
     origin_lon, origin_lat = _group_origin(group, member_records)
     normalized = _combine_member_datasets(solution_config, group, member_records, fetch_missing=fetch_missing)
+    if only_floors:
+        normalized = _filter_dataset_floors(normalized, only_floors)
     remapped = _remap_group_floors(normalized)
+
     floor_heights = _floor_heights(remapped.floors, solution_config.default_floor_spacing, solution_config.basement_floor_spacing)
     projected = project_dataset(remapped, origin_lon, origin_lat, floor_heights)
 
@@ -74,13 +85,37 @@ def generate_group(
     meshes = dataset_meshes(projected)
     manifest = _build_group_manifest(projected, group, member_records, processed_dir, export_dir)
     floor_visual_files = _write_floor_visual_glbs(meshes, manifest.get("floors", []), export_dir, group.id)
-    route_navigation_meshes = _complete_route_navigation_meshes(
+    clip_footprints = _route_clip_footprints_by_floor(meshes, manifest.get("floors", []))
+    route_navigation_meshes, route_nav_stats = _complete_route_navigation_meshes(
         export_dir / "door_route_cache",
         manifest,
         origin_lon,
         origin_lat,
+        clip_footprints_by_floor=clip_footprints,
+    )
+    route_debug_meshes = _route_debug_centerline_meshes_from_cache(
+        export_dir / "door_route_cache",
+        manifest.get("floors", []),
+        origin_lon,
+        origin_lat,
+        clip_footprints_by_floor=clip_footprints,
+    )
+    floor_walkable_path_files = _write_floor_walkable_path_glbs(
+        route_navigation_meshes,
+        manifest.get("floors", []),
+        export_dir,
+        group.id,
+    )
+    floor_route_debug_files = _write_floor_route_debug_glbs(
+        meshes,
+        route_debug_meshes,
+        manifest.get("floors", []),
+        export_dir,
+        group.id,
     )
     scene_navigation_meshes = route_navigation_meshes if route_navigation_meshes else meshes
+    if route_nav_stats:
+        manifest.setdefault("nav", {})["validation"] = route_nav_stats
     manifest["assets"] = {
         "visual_glb": names.visual_glb,
         "nav_glb": names.nav_glb,
@@ -93,11 +128,33 @@ def generate_group(
             for floor in sorted(manifest.get("floors", []), key=lambda item: int(item.get("floor_index", 0)))
             if int(floor.get("floor_index", 0)) in floor_visual_files
         ],
+        "walkable_path_glbs": [
+            {
+                "floor_index": int(floor.get("floor_index", 0)),
+                "floor_name": str(floor.get("floor_name", "")),
+                "filename": floor_walkable_path_files[int(floor.get("floor_index", 0))],
+            }
+            for floor in sorted(manifest.get("floors", []), key=lambda item: int(item.get("floor_index", 0)))
+            if int(floor.get("floor_index", 0)) in floor_walkable_path_files
+        ],
+        "route_debug_glbs": [
+            {
+                "floor_index": int(floor.get("floor_index", 0)),
+                "floor_name": str(floor.get("floor_name", "")),
+                "filename": floor_route_debug_files[int(floor.get("floor_index", 0))],
+            }
+            for floor in sorted(manifest.get("floors", []), key=lambda item: int(item.get("floor_index", 0)))
+            if int(floor.get("floor_index", 0)) in floor_route_debug_files
+        ],
     }
     manifest = refresh_generation_hash(manifest)
     floor_visual_paths = {
         floor_index: f"{_unimate_asset_base(group)}/{filename}"
         for floor_index, filename in floor_visual_files.items()
+    }
+    floor_walkable_path_paths = {
+        floor_index: f"{_unimate_asset_base(group)}/{filename}"
+        for floor_index, filename in floor_walkable_path_files.items()
     }
 
     _write_json(processed_dir / "dataset.json", projected.to_dict())
@@ -115,6 +172,7 @@ def generate_group(
         asset_base_path=_unimate_asset_base(group),
         navigation_meshes=scene_navigation_meshes,
         floor_visual_paths=floor_visual_paths,
+        floor_walkable_path_visual_paths=floor_walkable_path_paths,
     )
     _write_group_readme(export_dir, group, names, scene_path.name, manifest)
 
@@ -129,6 +187,8 @@ def generate_group(
             "visual_glb": str(export_dir / names.visual_glb),
             "nav_glb": str(export_dir / names.nav_glb),
             "floor_visual_glbs": [str(export_dir / filename) for filename in floor_visual_files.values()],
+            "walkable_path_glbs": [str(export_dir / filename) for filename in floor_walkable_path_files.values()],
+            "route_debug_glbs": [str(export_dir / filename) for filename in floor_route_debug_files.values()],
             "manifest": str(export_dir / names.manifest),
             "scene": str(scene_path),
             "readme": str(export_dir / names.readme),
@@ -141,6 +201,31 @@ def generate_group(
 def _member_records(group: BuildingGroupConfig, records: list[BuildingInventoryRecord]) -> list[BuildingInventoryRecord]:
     by_admin = {record.admin_id: record for record in records}
     return [by_admin[member] for member in group.members if member in by_admin]
+
+
+def _filter_group_members(group: BuildingGroupConfig, only_members: list[str]) -> BuildingGroupConfig:
+    requested = [str(member).strip() for member in only_members if str(member).strip()]
+    if not requested:
+        return group
+    known = set(group.members)
+    unknown = [member for member in requested if member not in known]
+    if unknown:
+        raise ValueError(f"Unknown members for group {group.id}: {', '.join(unknown)}")
+    members = [member for member in group.members if member in set(requested)]
+    if not members:
+        raise ValueError(f"Member filter removed every member from group {group.id}")
+    excluded_members = known - set(members)
+    aliases = [
+        alias
+        for alias in group.aliases
+        if alias not in excluded_members
+    ]
+    return replace(
+        group,
+        members=members,
+        aliases=aliases,
+        primary_member=group.primary_member if group.primary_member in members else members[0],
+    )
 
 
 def _group_origin(group: BuildingGroupConfig, records: list[BuildingInventoryRecord]) -> tuple[float, float]:
@@ -195,6 +280,41 @@ def _combine_member_datasets(
     )
     combined.source_urls = sorted(source_urls_seen)  # type: ignore[attr-defined]
     return combined
+
+
+def _filter_dataset_floors(dataset: NormalizedDataset, only_floors: list[str]) -> NormalizedDataset:
+    requested = {
+        _canonical_floor_name(floor_name)
+        for floor_name in only_floors
+        if str(floor_name).strip()
+    }
+    if not requested:
+        return dataset
+    rooms = [
+        room
+        for room in dataset.rooms
+        if _canonical_floor_name(room.floor_name) in requested
+    ]
+    portals = [
+        portal
+        for portal in dataset.portals
+        if _canonical_floor_name(portal.floor_name) in requested
+    ]
+    if not rooms and not portals:
+        raise ValueError(
+            f"No rooms or portals found for floor filter: {', '.join(sorted(requested))}"
+        )
+    filtered = NormalizedDataset(
+        building_id=dataset.building_id,
+        building_admin_id=dataset.building_admin_id,
+        building_name=dataset.building_name,
+        rooms=rooms,
+        portals=portals,
+        warnings=list(dataset.warnings),
+    )
+    if hasattr(dataset, "source_urls"):
+        filtered.source_urls = list(dataset.source_urls)  # type: ignore[attr-defined]
+    return filtered
 
 
 def _remap_group_floors(dataset: NormalizedDataset) -> NormalizedDataset:
@@ -369,23 +489,26 @@ def _complete_route_navigation_meshes(
     manifest: dict[str, Any],
     origin_lon: float,
     origin_lat: float,
-) -> list[MeshData]:
-    route_meshes = _route_navigation_meshes_from_cache(
+    *,
+    clip_footprints_by_floor: dict[str, Any] | None = None,
+) -> tuple[list[MeshData], dict[str, Any]]:
+    route_meshes, route_stats = _route_navigation_meshes_with_stats_from_cache(
         route_cache_dir,
         manifest.get("floors", []),
         origin_lon,
         origin_lat,
         point_records=_route_navigation_point_records(manifest),
         walk_links=_route_navigation_walk_link_records(manifest),
+        clip_footprints_by_floor=clip_footprints_by_floor,
     )
     if not route_meshes:
-        return []
+        return [], route_stats
 
     required_floor_names = _required_navigation_floor_names(manifest)
     route_floor_names = {_floor_name_from_route_nav_mesh(mesh.name) for mesh in route_meshes}
     if required_floor_names and not required_floor_names.issubset(route_floor_names):
-        return []
-    return route_meshes
+        return [], route_stats
+    return route_meshes, route_stats
 
 
 def _route_navigation_meshes_from_cache(
@@ -397,9 +520,118 @@ def _route_navigation_meshes_from_cache(
     corridor_radius: float = ROUTE_NAV_CORRIDOR_RADIUS,
     point_records: list[dict[str, Any]] | None = None,
     walk_links: list[dict[str, Any]] | None = None,
+    clip_footprints_by_floor: dict[str, Any] | None = None,
 ) -> list[MeshData]:
+    meshes, _stats = _route_navigation_meshes_with_stats_from_cache(
+        route_cache_dir,
+        floors,
+        origin_lon,
+        origin_lat,
+        corridor_radius=corridor_radius,
+        point_records=point_records,
+        walk_links=walk_links,
+        clip_footprints_by_floor=clip_footprints_by_floor,
+    )
+    return meshes
+
+
+def _route_debug_centerline_meshes_from_cache(
+    route_cache_dir: Path,
+    floors: list[dict[str, Any]],
+    origin_lon: float,
+    origin_lat: float,
+    *,
+    point_records: list[dict[str, Any]] | None = None,
+    walk_links: list[dict[str, Any]] | None = None,
+    clip_footprints_by_floor: dict[str, Any] | None = None,
+) -> list[MeshData]:
+    del point_records, walk_links
     if not route_cache_dir.exists():
         return []
+
+    floor_height_by_name = {
+        _canonical_floor_name(str(floor.get("floor_name", ""))): float(floor.get("height", 0.0))
+        for floor in floors
+    }
+    if not floor_height_by_name:
+        return []
+
+    clip_footprints = _normalise_route_clip_footprints(clip_footprints_by_floor)
+    projector = LocalProjector(origin_lon, origin_lat)
+    lines_by_floor: dict[str, list[LineString]] = {floor_name: [] for floor_name in floor_height_by_name}
+
+    for route_path in sorted(route_cache_dir.glob("route_*.json")):
+        try:
+            route_data = json.loads(route_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        file_lines_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
+        _collect_route_step_lines(route_data, projector, floor_height_by_name, file_lines_by_floor)
+        for floor_name, geometries in file_lines_by_floor.items():
+            for geometry in geometries:
+                if not isinstance(geometry, LineString):
+                    continue
+                lines_by_floor[floor_name].extend(_clip_route_line_to_floor(geometry, floor_name, clip_footprints))
+
+    meshes: list[MeshData] = []
+    for floor_name, lines in sorted(lines_by_floor.items(), key=lambda item: _floor_sort_key(item[0])):
+        height = floor_height_by_name[floor_name]
+        for line_index, line in enumerate(lines, start=1):
+            meshes.extend(_route_debug_centerline_meshes_for_line(floor_name, line, height, line_index))
+    return meshes
+
+
+def _route_debug_centerline_meshes_for_line(
+    floor_name: str,
+    line: LineString,
+    height: float,
+    line_index: int,
+) -> list[MeshData]:
+    coords = list(line.coords)
+    meshes: list[MeshData] = []
+    half_width = ROUTE_DEBUG_CENTERLINE_WIDTH / 2.0
+    for segment_index, (start, end) in enumerate(zip(coords, coords[1:]), start=1):
+        start_x, start_z = float(start[0]), float(start[1])
+        end_x, end_z = float(end[0]), float(end[1])
+        dx = end_x - start_x
+        dz = end_z - start_z
+        length = math.hypot(dx, dz)
+        if length < 0.05:
+            continue
+        nx = -dz / length * half_width
+        nz = dx / length * half_width
+        vertices = [
+            [round(start_x + nx, 6), round(float(height), 6), round(start_z + nz, 6)],
+            [round(start_x - nx, 6), round(float(height), 6), round(start_z - nz, 6)],
+            [round(end_x - nx, 6), round(float(height), 6), round(end_z - nz, 6)],
+            [round(end_x + nx, 6), round(float(height), 6), round(end_z + nz, 6)],
+        ]
+        meshes.append(
+            MeshData(
+                name=f"floor__{floor_name}__route_centerline_{line_index:04d}_{segment_index:02d}",
+                vertices=vertices,
+                faces=[[0, 1, 2, 3]],
+                material="route_centerline",
+                metadata={"debug_overlay": "route_centerline"},
+            )
+        )
+    return meshes
+
+
+def _route_navigation_meshes_with_stats_from_cache(
+    route_cache_dir: Path,
+    floors: list[dict[str, Any]],
+    origin_lon: float,
+    origin_lat: float,
+    *,
+    corridor_radius: float = ROUTE_NAV_CORRIDOR_RADIUS,
+    point_records: list[dict[str, Any]] | None = None,
+    walk_links: list[dict[str, Any]] | None = None,
+    clip_footprints_by_floor: dict[str, Any] | None = None,
+) -> tuple[list[MeshData], dict[str, Any]]:
+    stats = _route_navigation_validation_stats()
+    if not route_cache_dir.exists():
+        return [], {}
 
     floor_height_by_name = {
         _canonical_floor_name(str(floor.get("floor_name", ""))): float(floor.get("height", 0.0))
@@ -410,17 +642,55 @@ def _route_navigation_meshes_from_cache(
         for floor in floors
     }
     if not floor_height_by_name:
-        return []
+        return [], stats
 
+    clip_footprints = _normalise_route_clip_footprints(clip_footprints_by_floor)
+    stats["clip_floor_count"] = len(clip_footprints)
     projector = LocalProjector(origin_lon, origin_lat)
     geometries_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
     for route_path in sorted(route_cache_dir.glob("route_*.json")):
+        stats["route_cache"]["files_total"] += 1
         try:
             route_data = json.loads(route_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
+            stats["route_cache"]["files_rejected"] += 1
             continue
-        _collect_route_step_lines(route_data, projector, floor_height_by_name, geometries_by_floor)
-    _collect_manifest_walk_link_lines(walk_links or [], floor_name_by_index, geometries_by_floor)
+        file_geometries_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
+        _collect_route_step_lines(route_data, projector, floor_height_by_name, file_geometries_by_floor)
+        accepted_sources = 0
+        rejected_sources = 0
+        for floor_name, geometries in file_geometries_by_floor.items():
+            for geometry in geometries:
+                if not isinstance(geometry, LineString):
+                    continue
+                stats["route_cache"]["segments_total"] += 1
+                clipped_lines = _clip_route_line_to_floor(geometry, floor_name, clip_footprints)
+                if clipped_lines:
+                    accepted_sources += 1
+                    geometries_by_floor[floor_name].extend(clipped_lines)
+                else:
+                    rejected_sources += 1
+        if accepted_sources:
+            stats["route_cache"]["files_used"] += 1
+        elif rejected_sources:
+            stats["route_cache"]["files_rejected"] += 1
+        stats["route_cache"]["segments_used"] += accepted_sources
+        stats["route_cache"]["segments_rejected"] += rejected_sources
+
+    walk_geometries_by_floor: dict[str, list[Any]] = {floor_name: [] for floor_name in floor_height_by_name}
+    _collect_manifest_walk_link_lines(walk_links or [], floor_name_by_index, walk_geometries_by_floor)
+    for floor_name, geometries in walk_geometries_by_floor.items():
+        for geometry in geometries:
+            if not isinstance(geometry, LineString):
+                continue
+            stats["walk_links"]["segments_total"] += 1
+            clipped_lines = _clip_route_line_to_floor(geometry, floor_name, clip_footprints)
+            if clipped_lines:
+                stats["walk_links"]["segments_used"] += 1
+                geometries_by_floor[floor_name].extend(clipped_lines)
+            else:
+                stats["walk_links"]["segments_rejected"] += 1
+
     has_route_geometry_by_floor = {
         floor_name: any(isinstance(geometry, LineString) for geometry in geometries)
         for floor_name, geometries in geometries_by_floor.items()
@@ -432,10 +702,17 @@ def _route_navigation_meshes_from_cache(
         anchor = record.get("anchor") or record.get("navigation_anchor") or record.get("local")
         if floor_name not in geometries_by_floor or not _valid_local_anchor(anchor):
             continue
+        if not _point_inside_route_clip(float(anchor[0]), float(anchor[2]), floor_name, clip_footprints):
+            continue
         point_records_by_floor[floor_name].append(record)
         geometries_by_floor[floor_name].append(Point(float(anchor[0]), float(anchor[2])).buffer(ROUTE_NAV_POINT_RADIUS, quad_segs=8))
 
     _append_route_navigation_connectors(geometries_by_floor, point_records_by_floor)
+    if clip_footprints:
+        geometries_by_floor = {
+            floor_name: _clip_route_geometries_to_floor(geometries, floor_name, clip_footprints)
+            for floor_name, geometries in geometries_by_floor.items()
+        }
 
     meshes: list[MeshData] = []
     for floor_name, geometries in sorted(geometries_by_floor.items(), key=lambda item: _floor_sort_key(item[0])):
@@ -452,6 +729,10 @@ def _route_navigation_meshes_from_cache(
             continue
         merged = unary_union(buffered)
         merged = _bridge_route_components(merged, corridor_radius)
+        if clip_footprints:
+            merged = _clip_route_geometry_to_floor(merged, floor_name, clip_footprints)
+            if merged.is_empty:
+                continue
         if ROUTE_NAV_SIMPLIFY:
             merged = merged.simplify(ROUTE_NAV_SIMPLIFY, preserve_topology=True)
         height = floor_height_by_name[floor_name]
@@ -468,7 +749,122 @@ def _route_navigation_meshes_from_cache(
                 continue
             floor_meshes.append(mesh)
         meshes.extend(floor_meshes)
-    return meshes
+    stats["navmesh_bboxes"] = _route_mesh_bboxes(meshes)
+    return meshes, stats
+
+
+def _route_navigation_validation_stats() -> dict[str, Any]:
+    return {
+        "clip_margin": ROUTE_NAV_FOOTPRINT_CLIP_MARGIN,
+        "clip_floor_count": 0,
+        "route_cache": {
+            "files_total": 0,
+            "files_used": 0,
+            "files_rejected": 0,
+            "segments_total": 0,
+            "segments_used": 0,
+            "segments_rejected": 0,
+        },
+        "walk_links": {
+            "segments_total": 0,
+            "segments_used": 0,
+            "segments_rejected": 0,
+        },
+        "navmesh_bboxes": {},
+    }
+
+
+def _normalise_route_clip_footprints(clip_footprints_by_floor: dict[str, Any] | None) -> dict[str, Any]:
+    footprints: dict[str, Any] = {}
+    for raw_floor_name, geometry in (clip_footprints_by_floor or {}).items():
+        floor_name = _canonical_floor_name(str(raw_floor_name))
+        if geometry is None or getattr(geometry, "is_empty", True):
+            continue
+        footprint = geometry.buffer(0)
+        if footprint.is_empty:
+            continue
+        if ROUTE_NAV_FOOTPRINT_CLIP_MARGIN:
+            footprint = footprint.buffer(ROUTE_NAV_FOOTPRINT_CLIP_MARGIN, join_style="mitre").buffer(0)
+        if not footprint.is_empty:
+            footprints[floor_name] = footprint
+    return footprints
+
+
+def _clip_route_line_to_floor(line: LineString, floor_name: str, clip_footprints_by_floor: dict[str, Any]) -> list[LineString]:
+    if not clip_footprints_by_floor:
+        return [line] if not line.is_empty and line.length >= 0.05 else []
+    footprint = clip_footprints_by_floor.get(_canonical_floor_name(floor_name))
+    if footprint is None:
+        return [line] if not line.is_empty and line.length >= 0.05 else []
+    return _route_line_strings_from_geometry(line.intersection(footprint))
+
+
+def _clip_route_geometries_to_floor(
+    geometries: list[Any],
+    floor_name: str,
+    clip_footprints_by_floor: dict[str, Any],
+) -> list[Any]:
+    clipped: list[Any] = []
+    for geometry in geometries:
+        clipped_geometry = _clip_route_geometry_to_floor(geometry, floor_name, clip_footprints_by_floor)
+        if clipped_geometry.is_empty:
+            continue
+        if isinstance(clipped_geometry, GeometryCollection):
+            clipped.extend(geometry for geometry in clipped_geometry.geoms if not geometry.is_empty)
+        else:
+            clipped.append(clipped_geometry)
+    return clipped
+
+
+def _clip_route_geometry_to_floor(geometry: Any, floor_name: str, clip_footprints_by_floor: dict[str, Any]) -> Any:
+    if not clip_footprints_by_floor or geometry is None:
+        return geometry
+    footprint = clip_footprints_by_floor.get(_canonical_floor_name(floor_name))
+    if footprint is None:
+        return geometry
+    try:
+        return geometry.intersection(footprint)
+    except Exception:
+        return GeometryCollection()
+
+
+def _route_line_strings_from_geometry(geometry: Any) -> list[LineString]:
+    if geometry is None or geometry.is_empty:
+        return []
+    if isinstance(geometry, LineString):
+        return [geometry] if geometry.length >= 0.05 else []
+    if isinstance(geometry, MultiLineString | GeometryCollection):
+        lines: list[LineString] = []
+        for child in geometry.geoms:
+            lines.extend(_route_line_strings_from_geometry(child))
+        return lines
+    return []
+
+
+def _point_inside_route_clip(x: float, z: float, floor_name: str, clip_footprints_by_floor: dict[str, Any]) -> bool:
+    if not clip_footprints_by_floor:
+        return True
+    footprint = clip_footprints_by_floor.get(_canonical_floor_name(floor_name))
+    if footprint is None:
+        return True
+    return footprint.covers(Point(float(x), float(z)))
+
+
+def _route_mesh_bboxes(meshes: list[MeshData]) -> dict[str, list[float]]:
+    bboxes: dict[str, list[float]] = {}
+    for mesh in meshes:
+        floor_name = _floor_name_from_route_nav_mesh(mesh.name)
+        if not floor_name:
+            continue
+        for vertex in mesh.vertices:
+            x = float(vertex[0])
+            z = float(vertex[2])
+            bbox = bboxes.setdefault(floor_name, [x, z, x, z])
+            bbox[0] = min(bbox[0], x)
+            bbox[1] = min(bbox[1], z)
+            bbox[2] = max(bbox[2], x)
+            bbox[3] = max(bbox[3], z)
+    return {floor_name: [round(value, 6) for value in bbox] for floor_name, bbox in sorted(bboxes.items())}
 
 
 def _route_polygon_to_mesh(floor_name: str, polygon: Polygon, height: float, index: int) -> MeshData:
@@ -646,6 +1042,7 @@ def _load_external_doors(
     return records
 
 
+
 def _normalise_external_door(
     item: dict[str, Any],
     index: int,
@@ -658,9 +1055,9 @@ def _normalise_external_door(
 
     entry_id = str(item.get("entry_id") or item.get("external_id") or f"{group.id}_entry_{index:03d}")
     floor_name = _canonical_floor_name(str(item.get("floor_name") or "G"))
-    floor_index = item.get("floor_index")
+    floor_index = floor_index_by_name.get(floor_name.upper())
     if floor_index is None:
-        floor_index = floor_index_by_name.get(floor_name.upper(), 0)
+        return None
     node_name = str(item.get("node_name") or _external_door_node_name(index))
     display_name = str(item.get("display_name") or ("Main entrance" if index == 1 else f"Entry {index}"))
     aliases = _external_door_aliases(group, entry_id, node_name, display_name, index)
@@ -1229,10 +1626,142 @@ def _write_floor_visual_glbs(
     return floor_files
 
 
+def _write_floor_walkable_path_glbs(
+    meshes: list[MeshData],
+    floors: list[dict[str, Any]],
+    export_dir: Path,
+    group_id: str,
+) -> dict[int, str]:
+    floor_files: dict[int, str] = {}
+    if not meshes:
+        return floor_files
+    floor_height_by_name = {
+        str(floor.get("floor_name", "")): float(floor.get("height", 0.0))
+        for floor in floors
+    }
+    debug_meshes = [
+        MeshData(
+            name=mesh.name,
+            vertices=[list(vertex) for vertex in mesh.vertices],
+            faces=[list(face) for face in mesh.faces],
+            material="walkable_path",
+            metadata=dict(mesh.metadata),
+        )
+        for mesh in meshes
+    ]
+    for floor in sorted(floors, key=lambda item: int(item.get("floor_index", 0))):
+        floor_index = int(floor.get("floor_index", 0))
+        floor_name = str(floor.get("floor_name", floor_index))
+        floor_height = floor_height_by_name.get(floor_name, float(floor.get("height", 0.0)))
+        floor_meshes = [
+            _raise_floor_debug_mesh(localize_mesh_to_floor(mesh, floor_height))
+            for mesh in debug_meshes
+            if mesh_floor_name(mesh.name) == floor_name
+        ]
+        if not floor_meshes:
+            continue
+        filename = _floor_walkable_path_glb_name(group_id, floor_index)
+        write_glb(floor_meshes, export_dir / filename)
+        floor_files[floor_index] = filename
+    return floor_files
+
+
+def _write_floor_route_debug_glbs(
+    visual_meshes: list[MeshData],
+    route_meshes: list[MeshData],
+    floors: list[dict[str, Any]],
+    export_dir: Path,
+    group_id: str,
+) -> dict[int, str]:
+    floor_files: dict[int, str] = {}
+    if not route_meshes:
+        return floor_files
+    floor_height_by_name = {
+        str(floor.get("floor_name", "")): float(floor.get("height", 0.0))
+        for floor in floors
+    }
+    for floor in sorted(floors, key=lambda item: int(item.get("floor_index", 0))):
+        floor_index = int(floor.get("floor_index", 0))
+        floor_name = str(floor.get("floor_name", floor_index))
+        floor_height = floor_height_by_name.get(floor_name, float(floor.get("height", 0.0)))
+        floor_visual_meshes = floor_visual_meshes_from_meshes(visual_meshes, floor_name, floor_height)
+        floor_route_meshes = [
+            _raise_floor_debug_mesh(localize_mesh_to_floor(mesh, floor_height))
+            for mesh in route_meshes
+            if mesh_floor_name(mesh.name) == floor_name
+        ]
+        if not floor_route_meshes:
+            continue
+        filename = _floor_route_debug_glb_name(group_id, floor_index)
+        write_glb([*floor_visual_meshes, *floor_route_meshes], export_dir / filename)
+        floor_files[floor_index] = filename
+    return floor_files
+
+
+def _raise_floor_debug_mesh(mesh: MeshData) -> MeshData:
+    return MeshData(
+        name=mesh.name,
+        vertices=[[float(vertex[0]), round(float(vertex[1]) + 0.08, 6), float(vertex[2])] for vertex in mesh.vertices],
+        faces=[list(face) for face in mesh.faces],
+        material=mesh.material,
+        metadata=dict(mesh.metadata),
+    )
+
+
 def _floor_visual_glb_name(group_id: str, floor_index: int) -> str:
     if floor_index < 0:
         return f"{group_id}_floor_neg{abs(floor_index)}_visual.glb"
     return f"{group_id}_floor_{floor_index}_visual.glb"
+
+
+def _floor_walkable_path_glb_name(group_id: str, floor_index: int) -> str:
+    if floor_index < 0:
+        return f"{group_id}_floor_neg{abs(floor_index)}_walkable_paths.glb"
+    return f"{group_id}_floor_{floor_index}_walkable_paths.glb"
+
+
+def _floor_route_debug_glb_name(group_id: str, floor_index: int) -> str:
+    if floor_index < 0:
+        return f"{group_id}_floor_neg{abs(floor_index)}_route_debug.glb"
+    return f"{group_id}_floor_{floor_index}_route_debug.glb"
+
+
+def _route_clip_footprints_by_floor(meshes: list[MeshData], floors: list[dict[str, Any]]) -> dict[str, Any]:
+    floor_names = {_canonical_floor_name(str(floor.get("floor_name", ""))) for floor in floors}
+    polygons_by_floor: dict[str, list[Polygon]] = {floor_name: [] for floor_name in floor_names}
+    for mesh in meshes:
+        floor_name = _canonical_floor_name(mesh_floor_name(mesh.name))
+        if floor_name not in polygons_by_floor or not mesh.name.startswith("floor__"):
+            continue
+        polygons_by_floor[floor_name].extend(_mesh_top_footprint_polygons(mesh))
+    footprints: dict[str, Any] = {}
+    for floor_name, polygons in polygons_by_floor.items():
+        valid_polygons = [polygon for polygon in polygons if not polygon.is_empty and polygon.area > 0.01]
+        if not valid_polygons:
+            continue
+        footprint = unary_union(valid_polygons).buffer(0)
+        if not footprint.is_empty:
+            footprints[floor_name] = footprint
+    return footprints
+
+
+def _mesh_top_footprint_polygons(mesh: MeshData) -> list[Polygon]:
+    if not mesh.vertices:
+        return []
+    top_y = max(float(vertex[1]) for vertex in mesh.vertices)
+    polygons: list[Polygon] = []
+    for face in mesh.faces:
+        face_vertices = [mesh.vertices[index] for index in face if 0 <= index < len(mesh.vertices)]
+        if len(face_vertices) < 3:
+            continue
+        if any(abs(float(vertex[1]) - top_y) > 0.0001 for vertex in face_vertices):
+            continue
+        polygon = Polygon((float(vertex[0]), float(vertex[2])) for vertex in face_vertices)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if not polygon.is_empty and polygon.area > 0.01:
+            polygons.append(polygon)
+    return polygons
 
 
 def _unimate_asset_base(group: BuildingGroupConfig) -> str:

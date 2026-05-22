@@ -34,6 +34,7 @@ def write_unimate_scene(
     asset_base_path: str = "res://Assets/Buildings/Science",
     navigation_meshes: list[MeshData] | None = None,
     floor_visual_paths: dict[int, str] | None = None,
+    floor_walkable_path_visual_paths: dict[int, str] | None = None,
 ) -> Path:
     path = Path(output_path)
     building = manifest.get("building", {})
@@ -49,7 +50,11 @@ def write_unimate_scene(
     click_shapes = _click_shape_resources(meshes, floors)
     building_click_shape = _building_click_shape_resource(meshes)
     floor_visual_resources = _floor_visual_resources(floor_visual_paths or {}, floors)
-    ext_resource_count = 2 + len(floor_visual_resources)
+    floor_walkable_path_visual_resources = _floor_walkable_path_visual_resources(
+        floor_walkable_path_visual_paths or {},
+        floors,
+    )
+    ext_resource_count = 2 + len(floor_visual_resources) + len(floor_walkable_path_visual_resources)
     sub_resource_count = len(nav_resources) + len(click_shapes) + (1 if building_click_shape else 0)
     lines = [
         f"[gd_scene load_steps={1 + ext_resource_count + sub_resource_count} format=4]",
@@ -58,6 +63,8 @@ def write_unimate_scene(
         '[ext_resource type="Script" path="res://Scripts/map/FloorController.gd" id="2_floor"]',
     ]
     for resource in floor_visual_resources.values():
+        lines.append(f'[ext_resource type="PackedScene" path="{_quote_attr(resource["path"])}" id="{resource["id"]}"]')
+    for resource in floor_walkable_path_visual_resources.values():
         lines.append(f'[ext_resource type="PackedScene" path="{_quote_attr(resource["path"])}" id="{resource["id"]}"]')
     lines.append("")
     for resource in nav_resources.values():
@@ -141,6 +148,14 @@ def write_unimate_scene(
                     f'[node name="FloorVisual" parent="{floor_parent}/NavigationRegion3D/FloorMesh" instance=ExtResource("{visual_resource["id"]}")]',
                 ]
             )
+        walkable_path_visual_resource = floor_walkable_path_visual_resources.get(floor_index)
+        if walkable_path_visual_resource:
+            lines.extend(
+                [
+                    "",
+                    f'[node name="WalkablePathVisual" parent="{floor_parent}/NavigationRegion3D/FloorMesh" instance=ExtResource("{walkable_path_visual_resource["id"]}")]',
+                ]
+            )
         lines.extend(
             [
                 "",
@@ -168,18 +183,15 @@ def write_unimate_scene(
                     f"transform = {_transform(float(anchor[0]), 0.0, float(anchor[2]))}",
                 ]
             )
-            navigation_anchor = record.get("navigation_anchor")
-            if _valid_anchor(navigation_anchor):
-                offset_x = float(navigation_anchor[0]) - float(anchor[0])
-                offset_z = float(navigation_anchor[2]) - float(anchor[2])
-                if abs(offset_x) > 0.001 or abs(offset_z) > 0.001:
-                    lines.extend(
-                        [
-                            "",
-                            f'[node name="NavTarget" type="Node3D" parent="{node_path}"]',
-                            f"transform = {_transform(offset_x, 0.0, offset_z)}",
-                        ]
-                    )
+            navigation_offset = _navigation_target_offset(record, anchor, fallback_to_anchor=not should_snap)
+            if navigation_offset is not None:
+                lines.extend(
+                    [
+                        "",
+                        f'[node name="NavTarget" type="Node3D" parent="{node_path}"]',
+                        f"transform = {_transform(navigation_offset[0], 0.0, navigation_offset[2])}",
+                    ]
+                )
         lines.extend(
             [
                 "",
@@ -264,6 +276,19 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[str, str]:
 
 def _valid_anchor(anchor: Any) -> bool:
     return isinstance(anchor, list) and len(anchor) >= 3 and all(isinstance(value, int | float) for value in anchor[:3])
+
+
+def _navigation_target_offset(record: dict[str, Any], anchor: Any, *, fallback_to_anchor: bool) -> tuple[float, float, float] | None:
+    navigation_anchor = record.get("navigation_anchor")
+    if _valid_anchor(navigation_anchor):
+        offset_x = float(navigation_anchor[0]) - float(anchor[0])
+        offset_z = float(navigation_anchor[2]) - float(anchor[2])
+        if fallback_to_anchor or abs(offset_x) > 0.001 or abs(offset_z) > 0.001:
+            return (offset_x, 0.0, offset_z)
+        return None
+    if fallback_to_anchor:
+        return (0.0, 0.0, 0.0)
+    return None
 
 
 def _required_navigation_floors(
@@ -474,6 +499,17 @@ def _floor_visual_resources(paths: dict[int, str], floors: list[dict[str, Any]])
     return resources
 
 
+def _floor_walkable_path_visual_resources(paths: dict[int, str], floors: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
+    valid_indexes = {int(floor.get("floor_index", 0)) for floor in floors}
+    resources = {}
+    for floor_index, path in sorted(paths.items(), key=lambda item: int(item[0])):
+        index = int(floor_index)
+        if index not in valid_indexes or not str(path).strip():
+            continue
+        resources[index] = {"id": _floor_walkable_path_visual_resource_id(index), "path": str(path)}
+    return resources
+
+
 def _click_shape_resources(meshes: list[MeshData], floors: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     floor_index_by_name = {str(floor.get("floor_name", "")): int(floor.get("floor_index", 0)) for floor in floors}
     floor_height_by_index = {int(floor.get("floor_index", 0)): float(floor.get("height", 0.0)) for floor in floors}
@@ -535,6 +571,12 @@ def _floor_visual_resource_id(floor_index: int) -> str:
     if floor_index < 0:
         return f"floor_visual_neg{abs(floor_index)}"
     return f"floor_visual_{floor_index}"
+
+
+def _floor_walkable_path_visual_resource_id(floor_index: int) -> str:
+    if floor_index < 0:
+        return f"walkable_path_visual_neg{abs(floor_index)}"
+    return f"walkable_path_visual_{floor_index}"
 
 
 def _click_shape_id(floor_index: int) -> str:

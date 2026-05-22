@@ -36,11 +36,29 @@ def main(argv: list[str] | None = None) -> int:
     group_parser.add_argument("--config", default="configs/auckland.yaml")
     group_parser.add_argument("--groups-config", default="configs/auckland_building_groups.yaml")
     group_parser.add_argument("--no-fetch", action="store_true", help="Fail if cached raw member data is missing")
+    group_parser.add_argument(
+        "--only-member",
+        action="append",
+        default=[],
+        help="Generate only this group member admin id. Repeat or comma-separate for multiple members.",
+    )
+    group_parser.add_argument(
+        "--only-floor",
+        action="append",
+        default=[],
+        help="Generate only this floor label after canonicalization, for example G or 2. Repeat or comma-separate for multiple floors.",
+    )
     args = parser.parse_args(argv)
     if args.command == "group":
         solution_config = load_solution_config(args.config)
         group_config = load_group_config(args.groups_config).get(args.group_id)
-        result = generate_group(solution_config, group_config, fetch_missing=not args.no_fetch)
+        result = generate_group(
+            solution_config,
+            group_config,
+            fetch_missing=not args.no_fetch,
+            only_members=_split_values(args.only_member),
+            only_floors=_split_values(args.only_floor),
+        )
         print(f"Wrote {result['export_dir']}")
         print(
             f"Rooms: {result['rooms']}, floors: {result['floors']}, "
@@ -168,6 +186,13 @@ def _write_json(path: Path, data) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def _split_values(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        result.extend(part.strip() for part in str(value).split(",") if part.strip())
+    return result
 
 
 if __name__ == "__main__":

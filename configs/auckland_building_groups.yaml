@@ -36,3 +36,13 @@ groups:
       - "303"
       - "303S"
       - "305"
+
+  - id: science_test
+    display_name: Science Test Room 303
+    primary_member: "303"
+    members:
+      - "303"
+    aliases:
+      - science_test
+      - "303"
+

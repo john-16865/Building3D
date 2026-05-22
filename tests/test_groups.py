@@ -4,11 +4,13 @@ from math import cos, pi
 from shapely.geometry import MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 
+import building3d.groups as groups
 from building3d.config import BuildingGroupConfig, SolutionConfig
 from building3d.discovery import BuildingInventoryRecord
 from building3d.groups import (
     _dedupe_node_names,
     _route_anchor_envelope_mesh,
+    _route_navigation_meshes_with_stats_from_cache,
     _route_navigation_meshes_from_cache,
     _sync_nav_node_names,
     generate_group,
@@ -78,6 +80,56 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert "302 100E1_Elevator_SetE1" in scene_text
     assert '[node name="MainDoor" type="Node3D" parent="Floors/Floor0/Rooms"]' in scene_text
     assert json.loads((export_dir / "external_doors.json").read_text(encoding="utf-8"))[0]["node_name"] == "MainDoor"
+
+
+def test_generate_group_can_filter_to_one_member_and_one_floor_from_source(tmp_path):
+    solution = _solution_config(tmp_path)
+    records = [
+        _record("301-science", "301", [174.0, -36.0]),
+        _record("302-science", "302", [174.0002, -36.0002]),
+    ]
+    _write_locations(solution.raw_root / "buildings" / "301-science", "301", "0", "301-001", "Teaching Lab")
+    _write_locations(solution.raw_root / "buildings" / "302-science", "302", "G", "302-100E1", "Elevator")
+    _write_external_doors(solution.processed_root / "groups" / "science")
+    _write_room_door_points(solution.processed_root / "groups" / "science")
+
+    group = BuildingGroupConfig(
+        id="science",
+        display_name="Science Centre",
+        members=["301", "302"],
+        aliases=["science", "science centre", "301", "302"],
+        primary_member="302",
+    )
+
+    result = generate_group(
+        solution,
+        group,
+        records=records,
+        fetch_missing=False,
+        only_members=["301"],
+        only_floors=["G"],
+    )
+
+    export_dir = tmp_path / "exports" / "groups" / "science"
+    manifest = json.loads((export_dir / "science_manifest.json").read_text(encoding="utf-8"))
+    scene_text = (export_dir / "science_unimate.tscn").read_text(encoding="utf-8")
+
+    assert result["rooms"] == 1
+    assert result["portals"] == 0
+    assert result["floors"] == 1
+    assert manifest["building"]["id"] == "science"
+    assert manifest["building"]["members"] == ["301"]
+    assert manifest["floors"] == [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
+    assert manifest["rooms"][0]["source_building_admin_id"] == "301"
+    assert manifest["rooms"][0]["floor_name"] == "G"
+    assert manifest["rooms"][0]["floor_index"] == 0
+    assert manifest["assets"]["floor_visual_glbs"] == [
+        {"floor_index": 0, "floor_name": "G", "filename": "science_floor_0_visual.glb"}
+    ]
+    assert 'building_name = "science"' in scene_text
+    assert 'floor_name = "G"' in scene_text
+    assert "301 001_Teaching Lab" in scene_text
+    assert "302 100E1_Elevator_SetE1" not in scene_text
 
 
 def test_group_node_names_are_deduped_per_floor():
@@ -183,6 +235,244 @@ def test_route_navigation_meshes_follow_cached_route_corridors_not_floor_union(t
     assert max(xs) < 10.5
     assert min(zs) < -0.5
     assert max(zs) < 10.5
+
+
+def test_route_navigation_meshes_clip_stale_cached_routes_to_floor_footprint(tmp_path):
+    route_cache_dir = tmp_path / "door_route_cache"
+    route_cache_dir.mkdir()
+    origin_lon = 174.0
+    origin_lat = -36.0
+
+    def point(x: float, z: float) -> dict:
+        metres_per_degree_lon = 111_320.0 * cos(origin_lat * pi / 180.0)
+        return {
+            "floor_name": "0",
+            "lng": origin_lon + x / metres_per_degree_lon,
+            "lat": origin_lat + z / 111_320.0,
+            "zLevel": 0.0,
+        }
+
+    inside_route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(1.0, 1.0), point(8.0, 1.0)],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    stale_route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(40.0, -100.0), point(45.0, -100.0)],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    (route_cache_dir / "route_inside.json").write_text(json.dumps(inside_route), encoding="utf-8")
+    (route_cache_dir / "route_stale.json").write_text(json.dumps(stale_route), encoding="utf-8")
+    floors = [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
+    footprint = Polygon([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+
+    meshes, stats = _route_navigation_meshes_with_stats_from_cache(
+        route_cache_dir,
+        floors,
+        origin_lon,
+        origin_lat,
+        clip_footprints_by_floor={"G": footprint},
+    )
+
+    assert meshes
+    xs = [vertex[0] for mesh in meshes for vertex in mesh.vertices]
+    zs = [vertex[2] for mesh in meshes for vertex in mesh.vertices]
+    assert min(xs) >= -2.1
+    assert max(xs) <= 12.1
+    assert min(zs) >= -2.1
+    assert max(zs) <= 12.1
+    assert stats["route_cache"]["files_total"] == 2
+    assert stats["route_cache"]["files_used"] == 1
+    assert stats["route_cache"]["files_rejected"] == 1
+    assert stats["route_cache"]["segments_rejected"] >= 1
+
+
+def test_route_debug_centerlines_show_thin_cached_routes_without_navmesh_expansion(tmp_path):
+    route_cache_dir = tmp_path / "door_route_cache"
+    route_cache_dir.mkdir()
+    origin_lon = 174.0
+    origin_lat = -36.0
+
+    def point(x: float, z: float) -> dict:
+        metres_per_degree_lon = 111_320.0 * cos(origin_lat * pi / 180.0)
+        return {
+            "floor_name": "0",
+            "lng": origin_lon + x / metres_per_degree_lon,
+            "lat": origin_lat + z / 111_320.0,
+            "zLevel": 0.0,
+        }
+
+    route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(0.0, 0.0), point(0.0, 8.0), point(8.0, 8.0)],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    (route_cache_dir / "route_test.json").write_text(json.dumps(route), encoding="utf-8")
+    floors = [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
+
+    assert hasattr(groups, "_route_debug_centerline_meshes_from_cache")
+    meshes = groups._route_debug_centerline_meshes_from_cache(route_cache_dir, floors, origin_lon, origin_lat)
+
+    assert meshes
+    assert all(mesh.material == "route_centerline" for mesh in meshes)
+    xs = [vertex[0] for mesh in meshes for vertex in mesh.vertices]
+    zs = [vertex[2] for mesh in meshes for vertex in mesh.vertices]
+    assert min(xs) >= -0.2
+    assert max(xs) <= 8.2
+    assert min(zs) >= -0.2
+    assert max(zs) <= 8.2
+    assert _mesh_surface_area(meshes) < 4.0
+
+
+def test_route_debug_centerlines_ignore_manifest_walk_links_and_anchor_points(tmp_path):
+    route_cache_dir = tmp_path / "door_route_cache"
+    route_cache_dir.mkdir()
+    origin_lon = 174.0
+    origin_lat = -36.0
+
+    def point(x: float, z: float) -> dict:
+        metres_per_degree_lon = 111_320.0 * cos(origin_lat * pi / 180.0)
+        return {
+            "floor_name": "0",
+            "lng": origin_lon + x / metres_per_degree_lon,
+            "lat": origin_lat + z / 111_320.0,
+            "zLevel": 0.0,
+        }
+
+    route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(0.0, 0.0), point(5.0, 0.0)],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    (route_cache_dir / "route_test.json").write_text(json.dumps(route), encoding="utf-8")
+    floors = [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
+
+    assert hasattr(groups, "_route_debug_centerline_meshes_from_cache")
+    meshes = groups._route_debug_centerline_meshes_from_cache(
+        route_cache_dir,
+        floors,
+        origin_lon,
+        origin_lat,
+        point_records=[{"floor_name": "G", "anchor": [200.0, 0.0, 0.0]}],
+        walk_links=[
+            {
+                "kind": "walk",
+                "from_floor_index": 0,
+                "to_floor_index": 0,
+                "from_anchor": [0.0, 0.0, 0.0],
+                "to_anchor": [80.0, 0.0, 0.0],
+            }
+        ],
+    )
+
+    assert meshes
+    assert max(vertex[0] for mesh in meshes for vertex in mesh.vertices) <= 5.2
+
+
+def test_generate_group_writes_walkable_path_visual_when_route_cache_is_used(tmp_path):
+    solution = _solution_config(tmp_path)
+    records = [_record("301-science", "301", [174.0, -36.0])]
+    _write_locations(solution.raw_root / "buildings" / "301-science", "301", "0", "301-001", "Teaching Lab")
+    _write_room_door_points(solution.processed_root / "groups" / "science")
+
+    route_cache_dir = solution.export_root / "groups" / "science" / "door_route_cache"
+    route_cache_dir.mkdir(parents=True)
+    route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [
+                                    {"floor_name": "G", "lng": 174.00031, "lat": -35.99999, "zLevel": 0.0},
+                                    {"floor_name": "G", "lng": 174.00032, "lat": -35.99999, "zLevel": 0.0},
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    (route_cache_dir / "route_test.json").write_text(json.dumps(route), encoding="utf-8")
+
+    group = BuildingGroupConfig(
+        id="science",
+        display_name="Science Centre",
+        members=["301"],
+        aliases=["science", "301"],
+        primary_member="301",
+    )
+
+    generate_group(solution, group, records=records, fetch_missing=False)
+
+    export_dir = tmp_path / "exports" / "groups" / "science"
+    manifest = json.loads((export_dir / "science_manifest.json").read_text(encoding="utf-8"))
+    scene_text = (export_dir / "science_unimate.tscn").read_text(encoding="utf-8")
+
+    assert (export_dir / "science_floor_0_walkable_paths.glb").read_bytes()[:4] == b"glTF"
+    assert (export_dir / "science_floor_0_route_debug.glb").read_bytes()[:4] == b"glTF"
+    assert manifest["assets"]["walkable_path_glbs"] == [
+        {"floor_index": 0, "floor_name": "G", "filename": "science_floor_0_walkable_paths.glb"}
+    ]
+    assert manifest["assets"]["route_debug_glbs"] == [
+        {"floor_index": 0, "floor_name": "G", "filename": "science_floor_0_route_debug.glb"}
+    ]
+    assert "WalkablePathVisual" in scene_text
+    assert "science_floor_0_walkable_paths.glb" in scene_text
+    assert manifest["nav"]["validation"]["route_cache"]["files_used"] == 1
 
 
 def test_route_navigation_meshes_preserve_corridor_holes(tmp_path):
@@ -678,6 +968,14 @@ def _mesh_coverage_component_count(meshes) -> int:
     if isinstance(coverage, MultiPolygon):
         return len(coverage.geoms)
     return 0 if coverage.is_empty else 1
+
+
+def _mesh_surface_area(meshes) -> float:
+    faces = []
+    for mesh in meshes:
+        for face in mesh.faces:
+            faces.append(Polygon([(mesh.vertices[index][0], mesh.vertices[index][2]) for index in face]))
+    return float(unary_union(faces).area)
 
 
 def _nav_resource_edge_component_count(resource: dict) -> int:

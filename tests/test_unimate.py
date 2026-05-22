@@ -150,6 +150,43 @@ def test_write_unimate_scene_adds_room_navigation_target_child(tmp_path):
     assert "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5, 0, -2)" in text
 
 
+def test_write_unimate_scene_adds_zero_offset_room_navigation_target_when_anchor_missing(tmp_path):
+    manifest = {
+        "building": {"id": "science", "display_name": "Science Centre"},
+        "floors": [{"floor_index": 0, "floor_name": "G", "height": 0.0}],
+        "rooms": [
+            {
+                "external_id": "303-G17",
+                "node_name": "303 G17_Teaching Lab",
+                "floor_index": 0,
+                "anchor": [8.0, 0.0, 6.0],
+            }
+        ],
+        "portals": [
+            {
+                "external_id": "303-GE1",
+                "node_name": "303 GE1_Elevator_SetE1",
+                "floor_index": 0,
+                "anchor": [12.0, 0.0, 6.0],
+            }
+        ],
+        "external_doors": [],
+    }
+    nav_meshes = [
+        build_floor_slab(
+            "floor__G",
+            [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 0.0, 20.0], [0.0, 0.0, 20.0], [0.0, 0.0, 0.0]],
+        )
+    ]
+
+    path = write_unimate_scene(manifest, tmp_path / "science_unimate.tscn", navigation_meshes=nav_meshes)
+    text = path.read_text(encoding="utf-8")
+
+    assert '[node name="NavTarget" type="Node3D" parent="Floors/Floor0/Rooms/303 G17_Teaching Lab"]' in text
+    assert '[node name="NavTarget" type="Node3D" parent="Floors/Floor0/Rooms/303 GE1_Elevator_SetE1"]' not in text
+    assert "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)" in text
+
+
 def test_write_unimate_scene_snaps_external_doors_to_floor_navmesh(tmp_path):
     manifest = {
         "building": {"id": "science", "display_name": "Science Centre"},
