@@ -23,6 +23,13 @@ from building3d.projection import LocalProjector
 ROUTE_URL = "https://api.mapsindoors.com/auckland/api/directions/{graph_id}"
 GRAPH_DETAILS_URL = "https://api.mapsindoors.com/auckland/api/directions/details/{graph_id}"
 
+TARGETED_ROUTE_ENDPOINT_DOOR_OVERRIDES = {
+    # MapsIndoors routes to the building 305 corridor terminate at the corridor
+    # anchor, but the synthetic room polygon boundary is far from that endpoint.
+    # Using the boundary creates an unreachable Godot nav target for this key link.
+    ("305-400C1", "303S-400E4"),
+}
+
 
 @dataclass(frozen=True)
 class RoutePoint:
@@ -256,6 +263,7 @@ def _derive_one_room_door(
             continue
         line = LineString([(point.lon, point.lat) for point in line_points])
         door = _route_boundary_door(line, polygon)
+        door = _targeted_route_endpoint_door_override(room, candidate, route, door)
         row = _room_row(
             room=room,
             candidate=candidate,
@@ -266,7 +274,7 @@ def _derive_one_room_door(
             source_floor=source_floor,
             attempts=attempts,
         )
-        if row["door_source"] == "route_boundary_intersection":
+        if row["door_source"] in {"route_boundary_intersection", "targeted_route_endpoint_override"}:
             return row
         if best_fallback is None or _confidence_rank(row["confidence"]) > _confidence_rank(best_fallback["confidence"]):
             best_fallback = row
@@ -281,6 +289,26 @@ def _derive_one_room_door(
     row = _failed_room_row(room, "all route attempts failed")
     row["attempts"] = attempts
     return row
+
+
+def _targeted_route_endpoint_door_override(
+    room: dict[str, Any],
+    candidate: OriginCandidate,
+    route: dict[str, Any],
+    door: dict[str, Any],
+) -> dict[str, Any]:
+    key = (str(room.get("external_id", "")), candidate.external_id)
+    if key not in TARGETED_ROUTE_ENDPOINT_DOOR_OVERRIDES:
+        return door
+    route_end = _route_end(route)
+    if route_end is None:
+        return door
+    return {
+        "point": Point(route_end.lon, route_end.lat),
+        "source": "targeted_route_endpoint_override",
+        "confidence": "high",
+        "distance_to_route_end_m": 0.0,
+    }
 
 
 def _geometry_fallback_row(
