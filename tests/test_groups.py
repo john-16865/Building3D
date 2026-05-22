@@ -1,7 +1,7 @@
 import json
 from math import cos, pi
 
-from shapely.geometry import LineString, MultiPolygon, Point, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
 
 import building3d.groups as groups
@@ -1166,6 +1166,128 @@ def test_route_navigation_meshes_use_narrow_corridor_grid(tmp_path):
     assert max(z_values) - min(z_values) <= 1.5
 
 
+def test_route_navigation_meshes_merge_targeted_connectors_without_overlapping_edges(tmp_path, monkeypatch):
+    route_cache_dir = tmp_path / "door_route_cache"
+    route_cache_dir.mkdir()
+    origin_lon = 174.0
+    origin_lat = -36.0
+
+    def point(x: float, z: float) -> dict:
+        metres_per_degree_lon = 111_320.0 * cos(origin_lat * pi / 180.0)
+        return {
+            "floor_name": "0",
+            "lng": origin_lon + x / metres_per_degree_lon,
+            "lat": origin_lat + z / 111_320.0,
+            "zLevel": 0.0,
+        }
+
+    route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(0.0, 0.0), point(20.0, 0.0)],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    (route_cache_dir / "route_base.json").write_text(json.dumps(route), encoding="utf-8")
+    monkeypatch.setattr(groups, "ROUTE_NAV_TARGETED_POINT_CONNECTORS", {frozenset(("A", "B"))})
+    floors = [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
+    point_records = [
+        {"floor_name": "G", "external_id": "A", "anchor": [5.0, 0.0, 0.0]},
+        {"floor_name": "G", "external_id": "B", "anchor": [15.0, 0.0, 0.0]},
+    ]
+
+    meshes = _route_navigation_meshes_from_cache(
+        route_cache_dir,
+        floors,
+        origin_lon,
+        origin_lat,
+        point_records=point_records,
+    )
+    resources = _navigation_mesh_resources(meshes, floors, {0})
+
+    assert meshes
+    assert _nav_resource_edge_component_count(resources[0]) == 1
+    assert _nav_resource_max_edge_occupancy(resources[0]) <= 2
+
+
+def test_route_navigation_targeted_connectors_survive_multi_footprint_clip(tmp_path, monkeypatch):
+    route_cache_dir = tmp_path / "door_route_cache"
+    route_cache_dir.mkdir()
+    origin_lon = 174.0
+    origin_lat = -36.0
+
+    def point(x: float, z: float) -> dict:
+        metres_per_degree_lon = 111_320.0 * cos(origin_lat * pi / 180.0)
+        return {
+            "floor_name": "0",
+            "lng": origin_lon + x / metres_per_degree_lon,
+            "lat": origin_lat + z / 111_320.0,
+            "zLevel": 0.0,
+        }
+
+    route = {
+        "status": "OK",
+        "routes": [
+            {
+                "legs": [
+                    {
+                        "steps": [
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(0.0, 0.0), point(3.0, 0.0)],
+                            },
+                            {
+                                "abutters": "InsideBuilding",
+                                "geometry": [point(67.0, 0.0), point(70.0, 0.0)],
+                            },
+                        ]
+                    }
+                ]
+            }
+        ],
+    }
+    (route_cache_dir / "route_base.json").write_text(json.dumps(route), encoding="utf-8")
+
+    monkeypatch.setattr(groups, "ROUTE_NAV_TARGETED_POINT_CONNECTORS", {frozenset(("A", "B"))})
+    floors = [{"floor_index": 0, "floor_name": "G", "height": 0.0}]
+    point_records = [
+        {"floor_name": "G", "external_id": "A", "anchor": [0.0, 0.0, 0.0]},
+        {"floor_name": "G", "external_id": "B", "anchor": [70.0, 0.0, 0.0]},
+    ]
+    clip_footprints = {
+        "G": MultiPolygon(
+            [
+                box(-5.0, -5.0, 5.0, 5.0),
+                box(65.0, -5.0, 75.0, 5.0),
+            ]
+        )
+    }
+
+    meshes = _route_navigation_meshes_from_cache(
+        route_cache_dir,
+        floors,
+        origin_lon,
+        origin_lat,
+        point_records=point_records,
+        clip_footprints_by_floor=clip_footprints,
+    )
+    resources = _navigation_mesh_resources(meshes, floors, {0})
+
+    assert meshes
+    assert _nav_resource_edge_component_count(resources[0]) == 1
+    assert _nav_resource_max_edge_occupancy(resources[0]) <= 2
+
+
 def test_route_wall_openings_from_cache_open_crossed_wall_edges(tmp_path):
     route_cache_dir = tmp_path / "door_route_cache"
     route_cache_dir.mkdir()
@@ -1610,6 +1732,16 @@ def _nav_resource_edge_component_count(resource: dict) -> int:
                     remaining.remove(nxt)
                     stack.append(nxt)
     return components
+
+
+def _nav_resource_max_edge_occupancy(resource: dict) -> int:
+    edge_occupancy: dict[tuple[int, int], int] = {}
+    for polygon in resource.get("polygons", []):
+        for index, start in enumerate(polygon):
+            end = polygon[(index + 1) % len(polygon)]
+            edge = tuple(sorted((int(start), int(end))))
+            edge_occupancy[edge] = edge_occupancy.get(edge, 0) + 1
+    return max(edge_occupancy.values(), default=0)
 
 
 def _point_in_triangle_2d(point, triangle) -> bool:

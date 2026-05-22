@@ -124,13 +124,49 @@ def _append_indices(binary: bytearray, buffer_views: list[dict], accessors: list
 def _triangulate(faces: list[list[int]], vertices: list[list[float]]) -> list[int]:
     indices: list[int] = []
     for face in faces:
-        if len(face) < 3:
+        polygon = _clean_face(face, vertices)
+        if len(polygon) < 3:
             continue
-        if len(face) == 3:
-            indices.extend(face)
-            continue
-        indices.extend(_ear_clip_face(face, vertices))
+        if len(polygon) == 3:
+            face_indices = polygon
+        else:
+            face_indices = _ear_clip_face(polygon, vertices)
+        indices.extend(_orient_triangles_to_face_normal(face_indices, polygon, vertices))
     return indices
+
+
+def _orient_triangles_to_face_normal(indices: list[int], face: list[int], vertices: list[list[float]]) -> list[int]:
+    face_normal = _newell_normal(face, vertices)
+    oriented: list[int] = []
+    for offset in range(0, len(indices), 3):
+        triangle = indices[offset : offset + 3]
+        if len(triangle) < 3:
+            continue
+        triangle_normal = _triangle_normal(triangle, vertices)
+        if _dot(triangle_normal, face_normal) < 0:
+            oriented.extend([triangle[0], triangle[2], triangle[1]])
+        else:
+            oriented.extend(triangle)
+    return oriented
+
+
+def _triangle_normal(face: list[int], vertices: list[list[float]]) -> tuple[float, float, float]:
+    if len(face) < 3:
+        return (0.0, 0.0, 0.0)
+    a = vertices[face[0]]
+    b = vertices[face[1]]
+    c = vertices[face[2]]
+    ab = (float(b[0]) - float(a[0]), float(b[1]) - float(a[1]), float(b[2]) - float(a[2]))
+    ac = (float(c[0]) - float(a[0]), float(c[1]) - float(a[1]), float(c[2]) - float(a[2]))
+    return (
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    )
+
+
+def _dot(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
+    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 
 
 def _ear_clip_face(face: list[int], vertices: list[list[float]]) -> list[int]:

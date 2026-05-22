@@ -46,6 +46,22 @@ def test_build_wall_mesh_extrudes_edges_upward():
     assert [0.0, 1.5, 0.0] in mesh.vertices
 
 
+def test_build_wall_mesh_can_skip_open_edges():
+    ring = [
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0],
+    ]
+
+    mesh = build_wall_mesh("walls__floor_10", ring, height=1.5, open_edges={1})
+
+    assert len(mesh.vertices) == 8
+    assert mesh.faces == [[0, 1, 5, 4], [2, 3, 7, 6], [3, 0, 4, 7]]
+    assert mesh.metadata["open_edges"] == "1"
+
+
 def test_visual_meshes_exclude_debug_anchor_markers_but_keep_portal_areas():
     meshes = [
         MeshData("room__301-001__floor_G", [[0, 0, 0], [1, 0, 0], [0, 0, 1]], [[0, 1, 2]], "lecture"),
@@ -119,3 +135,140 @@ def test_dataset_meshes_derives_floor_slab_and_offsets_room_detail():
     assert by_name["room__301-001__floor_G"].vertices[0][1] == ROOM_PLATE_OFFSET
     assert by_name["walls__301-001__floor_G"].vertices[0][1] == ROOM_PLATE_OFFSET
     assert by_name["portal_area__elevator__301-E1__floor_G"].vertices[0][1] == ROOM_PLATE_OFFSET
+
+
+def test_dataset_meshes_uses_door_points_to_open_shared_short_wall_edges():
+    floor = SimpleNamespace(floor_name="G", height=0.0, polygon_local=[])
+    room = SimpleNamespace(
+        source_id="feature-301-001",
+        external_id="301-001",
+        floor_name="G",
+        category="lecture",
+        polygon_local=[
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+        ],
+        anchor_local=[1.0, 0.0, 1.0],
+    )
+    portal = SimpleNamespace(
+        external_id="301-E1",
+        floor_name="G",
+        kind="elevator",
+        group_id="E1",
+        polygon_local=[
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, 0.0, 2.0],
+            [2.0, 0.0, 2.0],
+            [2.0, 0.0, 0.0],
+        ],
+        anchor_local=[2.5, 0.0, 1.0],
+    )
+    dataset = SimpleNamespace(floors=[floor], rooms=[room], portals=[portal])
+    door_openings = [
+        {
+            "source_id": "feature-301-001",
+            "external_id": "301-001",
+            "floor_name": "G",
+            "door_local": [2.0, 0.0, 1.0],
+            "door_source": "route_boundary_intersection",
+            "confidence": "high",
+        }
+    ]
+
+    meshes = dataset_meshes(dataset, door_openings=door_openings)
+    by_name = {mesh.name: mesh for mesh in meshes}
+
+    assert len(by_name["walls__301-001__floor_G"].faces) == 3
+    assert len(by_name["portal_walls__elevator__301-E1__floor_G"].faces) == 3
+    assert by_name["walls__301-001__floor_G"].metadata["open_edges"] == "1"
+    assert by_name["portal_walls__elevator__301-E1__floor_G"].metadata["open_edges"] == "1"
+
+
+def test_dataset_meshes_falls_back_to_long_edge_when_room_has_no_opening():
+    floor = SimpleNamespace(floor_name="G", height=0.0, polygon_local=[])
+    room = SimpleNamespace(
+        source_id="feature-301-001",
+        external_id="301-001",
+        floor_name="G",
+        category="lecture",
+        polygon_local=[
+            [0.0, 0.0, 0.0],
+            [6.0, 0.0, 0.0],
+            [6.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+        ],
+        anchor_local=[3.0, 0.0, 1.0],
+    )
+    corridor = SimpleNamespace(
+        source_id="feature-301-c1",
+        external_id="301-C1",
+        floor_name="G",
+        category="corridor",
+        polygon_local=[
+            [0.0, 0.0, -1.0],
+            [6.0, 0.0, -1.0],
+            [6.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ],
+        anchor_local=[3.0, 0.0, -0.5],
+    )
+    dataset = SimpleNamespace(floors=[floor], rooms=[room, corridor], portals=[])
+    door_openings = [
+        {
+            "source_id": "feature-301-001",
+            "external_id": "301-001",
+            "floor_name": "G",
+            "door_local": [3.0, 0.0, 0.0],
+            "door_source": "route_boundary_intersection",
+            "confidence": "high",
+        }
+    ]
+
+    meshes = dataset_meshes(dataset, door_openings=door_openings)
+    by_name = {mesh.name: mesh for mesh in meshes}
+
+    assert len(by_name["walls__301-001__floor_G"].faces) == 3
+    assert len(by_name["walls__301-C1__floor_G"].faces) == 3
+    assert by_name["walls__301-001__floor_G"].metadata["open_edges"] == "1"
+    assert by_name["walls__301-C1__floor_G"].metadata["open_edges"] == "1"
+
+
+def test_dataset_meshes_uses_lower_confidence_door_record_as_last_resort():
+    floor = SimpleNamespace(floor_name="G", height=0.0, polygon_local=[])
+    room = SimpleNamespace(
+        source_id="feature-301-001",
+        external_id="301-001",
+        floor_name="G",
+        category="office",
+        polygon_local=[
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+        ],
+        anchor_local=[1.0, 0.0, 1.0],
+    )
+    dataset = SimpleNamespace(floors=[floor], rooms=[room], portals=[])
+    door_openings = [
+        {
+            "source_id": "feature-301-001",
+            "external_id": "301-001",
+            "floor_name": "G",
+            "door_local": [1.0, 0.0, 0.0],
+            "door_source": "nearest_boundary_to_route_endpoint",
+            "confidence": "low",
+        }
+    ]
+
+    meshes = dataset_meshes(dataset, door_openings=door_openings)
+    by_name = {mesh.name: mesh for mesh in meshes}
+
+    assert len(by_name["walls__301-001__floor_G"].faces) == 3
+    assert by_name["walls__301-001__floor_G"].metadata["open_edges"] == "1"

@@ -19,3 +19,6 @@ exports/**
 *.blend
 *.blend1
 *.glb
+
+# Claude Image Paste screenshots
+.claude-images/

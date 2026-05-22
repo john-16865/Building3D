@@ -365,6 +365,7 @@ def _collect_navigation_resources(
             floor_index,
             {"id": _navigation_mesh_id(floor_index), "vertices": [], "polygons": []},
         )
+        polygon_keys = resource.setdefault("_polygon_keys", set())
         floor_vertex_keys = vertex_keys.setdefault(floor_index, {})
         top_faces = (
             _top_surface_polygons(mesh)
@@ -381,7 +382,14 @@ def _collect_navigation_resources(
                     resource["vertices"].append(list(local_vertex))
                 polygon.append(floor_vertex_keys[local_vertex])
             if len(set(polygon)) >= 3:
-                resource["polygons"].append(_godot_navigation_polygon(polygon, resource["vertices"]))
+                godot_polygon = _godot_navigation_polygon(polygon, resource["vertices"])
+                polygon_key = tuple(sorted(godot_polygon))
+                if polygon_key in polygon_keys:
+                    continue
+                polygon_keys.add(polygon_key)
+                resource["polygons"].append(godot_polygon)
+    for resource in resources.values():
+        resource.pop("_polygon_keys", None)
     return resources
 
 

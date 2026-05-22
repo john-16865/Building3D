@@ -43,7 +43,7 @@ ROUTE_NAV_COMPONENT_BRIDGE_MAX_DISTANCE = 125.0
 ROUTE_NAV_ANCHOR_ENVELOPE_CELL_SIZE = 20.0
 ROUTE_NAV_ANCHOR_ENVELOPE_MARGIN = 2.0
 ROUTE_NAV_ANCHOR_ENVELOPE_MIN_CELLS = 4
-ROUTE_NAV_GRID_CELL_SIZE = 0.25
+ROUTE_NAV_GRID_CELL_SIZE = 0.5
 ROUTE_NAV_GRID_MIN_CELL_COVERAGE = 0.02
 ROUTE_NAV_SIMPLIFY = 0.03
 ROUTE_NAV_TRIANGLE_MIN_AREA = 0.001
@@ -53,8 +53,19 @@ ROUTE_NAV_FOOTPRINT_GAP_ROUTE_MAX_LENGTH = 25.0
 ROUTE_NAV_WALL_BLOCKER_CLEARANCE = 0.15
 ROUTE_NAV_WALL_INTERSECTION_TOLERANCE = 0.05
 ROUTE_NAV_TARGETED_POINT_CONNECTORS = {
+    frozenset(("303-412", "301-407")),
+    frozenset(("303-412", "301-437")),
+    frozenset(("302-491", "302-459")),
     frozenset(("303S-400E4", "305-400C1")),
 }
+ROUTE_NAV_TARGETED_POINT_CONNECTOR_MAX_DISTANCE = 125.0
+ROUTE_NAV_CUSTOM_CONNECTOR_SEGMENTS_BY_FLOOR = {
+    # Building 302 floor 4: Godot's runtime nav graph truncates before the
+    # lower 302 office wing unless this known corridor gap is made explicit.
+    "4": [((20.5, 13.0), (4.031878, -27.795901))],
+}
+ROUTE_NAV_CUSTOM_CONNECTOR_RADIUS_MULTIPLIER = 1.5
+ROUTE_NAV_CUSTOM_CONNECTOR_PAD_MULTIPLIER = 2.0
 ROUTE_DEBUG_CENTERLINE_WIDTH = 0.2
 ROUTE_CACHE_ENDPOINT_SCOPE_TOLERANCE = 3.0
 
@@ -800,10 +811,40 @@ def _route_navigation_meshes_with_stats_from_cache(
         merged = _bridge_route_components(merged, corridor_radius)
         wall_blocker_index = wall_blocker_indexes.get(floor_name)
         merged = _subtract_route_wall_blockers(merged, wall_blocker_index)
+        targeted_connector_lines = list(targeted_connector_lines_by_floor.get(floor_name, []))
+        custom_connector_lines = [
+            LineString([(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))])
+            for start, end in ROUTE_NAV_CUSTOM_CONNECTOR_SEGMENTS_BY_FLOOR.get(floor_name, [])
+        ]
+        custom_connector_geometries = [
+            _custom_route_connector_geometry(line, corridor_radius)
+            for line in custom_connector_lines
+            if not line.is_empty
+        ]
+        custom_connector_geometries = [geometry for geometry in custom_connector_geometries if not geometry.is_empty]
+        custom_connector_geometry = unary_union(custom_connector_geometries).buffer(0) if custom_connector_geometries else None
+        targeted_connectors: list[Any] = []
+        if targeted_connector_lines:
+            targeted_connectors = [
+                line.buffer(corridor_radius, cap_style="round", join_style="round", quad_segs=8).buffer(0)
+                for line in targeted_connector_lines
+                if not line.is_empty
+            ]
+            targeted_connectors = [connector for connector in targeted_connectors if not connector.is_empty]
+            if targeted_connectors:
+                merged = unary_union([merged, *targeted_connectors]).buffer(0)
         if final_clip_footprints:
             merged = _clip_route_geometry_to_floor(merged, floor_name, final_clip_footprints)
+            if targeted_connectors:
+                # Explicit connectors repair known same-floor gaps between Science footprints.
+                merged = unary_union([merged, *targeted_connectors]).buffer(0)
             if merged.is_empty:
                 continue
+        if custom_connector_geometry is not None and not custom_connector_geometry.is_empty:
+            # Custom connectors must be part of the same grid mesh as the route surface.
+            # Overlapping separate meshes look connected visually, but Godot path queries
+            # can stop on the first island and never transition into the connector.
+            merged = unary_union([merged, custom_connector_geometry]).buffer(0)
         if ROUTE_NAV_SIMPLIFY:
             merged = merged.simplify(ROUTE_NAV_SIMPLIFY, preserve_topology=True)
         height = floor_height_by_name[floor_name]
@@ -815,22 +856,34 @@ def _route_navigation_meshes_with_stats_from_cache(
 
         floor_meshes: list[MeshData] = []
         for index, polygon in enumerate(_iter_route_polygons(merged), start=1):
-            mesh = _route_polygon_to_mesh(floor_name, polygon, height, index, wall_blocker_index=wall_blocker_index)
+            mesh = _route_polygon_to_mesh(
+                floor_name,
+                polygon,
+                height,
+                index,
+                wall_blocker_index=wall_blocker_index,
+                wall_bypass_geometry=custom_connector_geometry,
+            )
             if not mesh.faces:
                 continue
             floor_meshes.append(mesh)
-        targeted_connector_lines = targeted_connector_lines_by_floor.get(floor_name, [])
-        for line_index, line in enumerate(targeted_connector_lines, start=len(floor_meshes) + 1):
-            targeted_connector = line.buffer(corridor_radius, cap_style="round", join_style="round", quad_segs=8).buffer(0)
-            if final_clip_footprints:
-                targeted_connector = _clip_route_geometry_to_floor(targeted_connector, floor_name, final_clip_footprints)
-            for polygon in _iter_route_polygons(targeted_connector):
-                mesh = _route_polygon_to_mesh(floor_name, polygon, height, line_index, wall_blocker_index=None)
-                if mesh.faces:
-                    floor_meshes.append(mesh)
         meshes.extend(floor_meshes)
     stats["navmesh_bboxes"] = _route_mesh_bboxes(meshes)
     return meshes, stats
+
+
+def _custom_route_connector_geometry(line: LineString, corridor_radius: float) -> Any:
+    if line.is_empty:
+        return line
+    custom_radius = corridor_radius * ROUTE_NAV_CUSTOM_CONNECTOR_RADIUS_MULTIPLIER
+    endpoint_radius = corridor_radius * ROUTE_NAV_CUSTOM_CONNECTOR_PAD_MULTIPLIER
+    coords = list(line.coords)
+    geometries = [
+        line.buffer(custom_radius, cap_style="round", join_style="round", quad_segs=8),
+        Point(coords[0]).buffer(endpoint_radius, quad_segs=8),
+        Point(coords[-1]).buffer(endpoint_radius, quad_segs=8),
+    ]
+    return unary_union(geometries).buffer(0)
 
 
 def _targeted_route_navigation_connector_lines(point_records_by_floor: dict[str, list[dict[str, Any]]]) -> dict[str, list[LineString]]:
@@ -854,7 +907,7 @@ def _targeted_route_navigation_connector_lines(point_records_by_floor: dict[str,
             if not _valid_local_anchor(start_anchor) or not _valid_local_anchor(end_anchor):
                 continue
             distance = _distance_2d(float(start_anchor[0]), float(start_anchor[2]), float(end_anchor[0]), float(end_anchor[2]))
-            if distance <= 0.05 or distance > ROUTE_NAV_POINT_CONNECTOR_MAX_DISTANCE:
+            if distance <= 0.05 or distance > ROUTE_NAV_TARGETED_POINT_CONNECTOR_MAX_DISTANCE:
                 continue
             lines_by_floor.setdefault(floor_name, []).append(
                 LineString(
@@ -1261,9 +1314,18 @@ def _subtract_route_wall_blockers(geometry: Any, wall_blocker_index: tuple[Any, 
         return geometry
 
 
-def _route_grid_cell_blocked_by_wall(cell: Polygon, wall_blocker_index: tuple[Any, list[LineString]] | None) -> bool:
+def _route_grid_cell_blocked_by_wall(
+    cell: Polygon,
+    wall_blocker_index: tuple[Any, list[LineString]] | None,
+    *,
+    wall_bypass_geometry: Any | None = None,
+) -> bool:
     if wall_blocker_index is None:
         return False
+    if wall_bypass_geometry is not None and not wall_bypass_geometry.is_empty:
+        bypass_area = cell.intersection(wall_bypass_geometry).area
+        if bypass_area >= cell.area * 0.2:
+            return False
     for blocker in _query_wall_blockers(wall_blocker_index, cell):
         if cell.intersects(blocker):
             return True
@@ -1303,6 +1365,7 @@ def _route_polygon_to_mesh(
     index: int,
     *,
     wall_blocker_index: tuple[Any, list[LineString]] | None = None,
+    wall_bypass_geometry: Any | None = None,
 ) -> MeshData:
     """Convert a route corridor polygon into edge-connected grid cells."""
     suffix = "" if index == 1 else f"__part_{index}"
@@ -1340,7 +1403,7 @@ def _route_polygon_to_mesh(
             x0 = start_x + x_index * cell_size
             x1 = x0 + cell_size
             cell = box(x0, z0, x1, z1)
-            if _route_grid_cell_blocked_by_wall(cell, wall_blocker_index):
+            if _route_grid_cell_blocked_by_wall(cell, wall_blocker_index, wall_bypass_geometry=wall_bypass_geometry):
                 continue
             covered_area = coverage_polygon.intersection(cell).area
             if covered_area < min_cell_area:

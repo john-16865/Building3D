@@ -51,6 +51,22 @@ def test_triangulate_preserves_concave_polygon_area():
     assert _triangle_area(indices, vertices) == _polygon_area(vertices)
 
 
+def test_triangulate_preserves_horizontal_face_winding():
+    vertices = [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 4.0],
+        [4.0, 0.0, 4.0],
+        [4.0, 0.0, 0.0],
+    ]
+    face = list(range(len(vertices)))
+
+    indices = _triangulate([face], vertices)
+
+    assert len(indices) == 6
+    for offset in range(0, len(indices), 3):
+        assert _normal_y(indices[offset : offset + 3], vertices) > 0.0
+
+
 def _triangle_area(indices, vertices) -> float:
     area = 0.0
     for offset in range(0, len(indices), 3):
@@ -65,3 +81,10 @@ def _polygon_area(vertices) -> float:
         nxt = vertices[(index + 1) % len(vertices)]
         area += point[0] * nxt[2] - nxt[0] * point[2]
     return round(abs(area) / 2.0, 6)
+
+
+def _normal_y(indices, vertices) -> float:
+    a, b, c = [vertices[index] for index in indices]
+    ab = [b[index] - a[index] for index in range(3)]
+    ac = [c[index] - a[index] for index in range(3)]
+    return ab[2] * ac[0] - ab[0] * ac[2]
