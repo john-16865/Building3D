@@ -361,7 +361,7 @@ def test_route_debug_centerlines_show_thin_cached_routes_without_navmesh_expansi
     assert _mesh_surface_area(meshes) < 4.0
 
 
-def test_route_debug_centerlines_buffer_turns_as_one_continuous_mesh(tmp_path):
+def test_route_debug_centerlines_draw_turns_as_separate_thin_segments(tmp_path):
     route_cache_dir = tmp_path / "door_route_cache"
     route_cache_dir.mkdir()
     origin_lon = 174.0
@@ -402,11 +402,13 @@ def test_route_debug_centerlines_buffer_turns_as_one_continuous_mesh(tmp_path):
 
     meshes = groups._route_debug_centerline_meshes_from_cache(route_cache_dir, floors, origin_lon, origin_lat)
 
-    assert len(meshes) == 1
-    assert meshes[0].material == "route_centerline"
-    assert meshes[0].metadata["debug_overlay"] == "route_centerline"
+    assert len(meshes) == 2
+    assert all(mesh.material == "route_centerline" for mesh in meshes)
+    assert all(mesh.metadata["debug_overlay"] == "route_centerline" for mesh in meshes)
+    assert all(len(mesh.vertices) == 4 for mesh in meshes)
+    assert all(mesh.faces == [[0, 1, 2, 3]] for mesh in meshes)
     assert _mesh_surface_area(meshes) > 1.4
-    assert _mesh_surface_area(meshes) < 2.4
+    assert _mesh_surface_area(meshes) < 1.8
 
 
 def test_route_debug_centerlines_ignore_manifest_walk_links_and_anchor_points(tmp_path):

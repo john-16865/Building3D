@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon, box
-from shapely.ops import linemerge, nearest_points, unary_union
+from shapely.ops import nearest_points, unary_union
 from shapely.strtree import STRtree
 
 from building3d.artifacts import artifact_names
@@ -633,17 +633,9 @@ def _route_debug_centerline_meshes_from_cache(
     meshes: list[MeshData] = []
     for floor_name, lines in sorted(lines_by_floor.items(), key=lambda item: _floor_sort_key(item[0])):
         height = floor_height_by_name[floor_name]
-        for line_index, line in enumerate(_merge_route_debug_centerline_lines(lines), start=1):
+        for line_index, line in enumerate(lines, start=1):
             meshes.extend(_route_debug_centerline_meshes_for_line(floor_name, line, height, line_index))
     return meshes
-
-
-def _merge_route_debug_centerline_lines(lines: list[LineString]) -> list[LineString]:
-    valid_lines = [line for line in lines if isinstance(line, LineString) and line.length >= 0.05]
-    if len(valid_lines) <= 1:
-        return valid_lines
-    merged = linemerge(MultiLineString(valid_lines))
-    return [line for line in _route_line_strings_from_geometry(merged) if line.length >= 0.05]
 
 
 def _route_debug_centerline_meshes_for_line(
@@ -652,28 +644,30 @@ def _route_debug_centerline_meshes_for_line(
     height: float,
     line_index: int,
 ) -> list[MeshData]:
+    coords = list(line.coords)
     meshes: list[MeshData] = []
     half_width = ROUTE_DEBUG_CENTERLINE_WIDTH / 2.0
-    if line.length < 0.05:
-        return meshes
-
-    buffered = line.buffer(half_width, cap_style="round", join_style="round", quad_segs=8).buffer(0)
-    for part_index, polygon in enumerate(_iter_route_polygons(buffered), start=1):
-        coords = list(polygon.exterior.coords)
-        if len(coords) < 4:
+    for segment_index, (start, end) in enumerate(zip(coords, coords[1:]), start=1):
+        start_x, start_z = float(start[0]), float(start[1])
+        end_x, end_z = float(end[0]), float(end[1])
+        dx = end_x - start_x
+        dz = end_z - start_z
+        length = math.hypot(dx, dz)
+        if length < 0.05:
             continue
-        suffix = "" if part_index == 1 else f"__part_{part_index}"
+        nx = -dz / length * half_width
+        nz = dx / length * half_width
         vertices = [
-            [round(float(x), 6), round(float(height), 6), round(float(z), 6)]
-            for x, z in coords[:-1]
+            [round(start_x + nx, 6), round(float(height), 6), round(start_z + nz, 6)],
+            [round(start_x - nx, 6), round(float(height), 6), round(start_z - nz, 6)],
+            [round(end_x - nx, 6), round(float(height), 6), round(end_z - nz, 6)],
+            [round(end_x + nx, 6), round(float(height), 6), round(end_z + nz, 6)],
         ]
-        if len(vertices) < 3:
-            continue
         meshes.append(
             MeshData(
-                name=f"floor__{floor_name}__route_centerline_{line_index:04d}{suffix}",
+                name=f"floor__{floor_name}__route_centerline_{line_index:04d}_{segment_index:02d}",
                 vertices=vertices,
-                faces=[list(range(len(vertices)))],
+                faces=[[0, 1, 2, 3]],
                 material="route_centerline",
                 metadata={"debug_overlay": "route_centerline"},
             )
@@ -824,6 +818,7 @@ def _route_navigation_meshes_with_stats_from_cache(
         custom_connector_geometries = [geometry for geometry in custom_connector_geometries if not geometry.is_empty]
         custom_connector_geometry = unary_union(custom_connector_geometries).buffer(0) if custom_connector_geometries else None
         targeted_connectors: list[Any] = []
+        targeted_connector_geometry = None
         if targeted_connector_lines:
             targeted_connectors = [
                 line.buffer(corridor_radius, cap_style="round", join_style="round", quad_segs=8).buffer(0)
@@ -832,12 +827,13 @@ def _route_navigation_meshes_with_stats_from_cache(
             ]
             targeted_connectors = [connector for connector in targeted_connectors if not connector.is_empty]
             if targeted_connectors:
-                merged = unary_union([merged, *targeted_connectors]).buffer(0)
+                targeted_connector_geometry = unary_union(targeted_connectors).buffer(0)
+                merged = unary_union([merged, targeted_connector_geometry]).buffer(0)
         if final_clip_footprints:
             merged = _clip_route_geometry_to_floor(merged, floor_name, final_clip_footprints)
-            if targeted_connectors:
+            if targeted_connector_geometry is not None and not targeted_connector_geometry.is_empty:
                 # Explicit connectors repair known same-floor gaps between Science footprints.
-                merged = unary_union([merged, *targeted_connectors]).buffer(0)
+                merged = unary_union([merged, targeted_connector_geometry]).buffer(0)
             if merged.is_empty:
                 continue
         if custom_connector_geometry is not None and not custom_connector_geometry.is_empty:
@@ -845,6 +841,12 @@ def _route_navigation_meshes_with_stats_from_cache(
             # Overlapping separate meshes look connected visually, but Godot path queries
             # can stop on the first island and never transition into the connector.
             merged = unary_union([merged, custom_connector_geometry]).buffer(0)
+        wall_bypass_geometries = [
+            geometry
+            for geometry in (custom_connector_geometry, targeted_connector_geometry)
+            if geometry is not None and not geometry.is_empty
+        ]
+        wall_bypass_geometry = unary_union(wall_bypass_geometries).buffer(0) if wall_bypass_geometries else None
         if ROUTE_NAV_SIMPLIFY:
             merged = merged.simplify(ROUTE_NAV_SIMPLIFY, preserve_topology=True)
         height = floor_height_by_name[floor_name]
@@ -862,7 +864,7 @@ def _route_navigation_meshes_with_stats_from_cache(
                 height,
                 index,
                 wall_blocker_index=wall_blocker_index,
-                wall_bypass_geometry=custom_connector_geometry,
+                wall_bypass_geometry=wall_bypass_geometry,
             )
             if not mesh.faces:
                 continue
@@ -1408,10 +1410,16 @@ def _route_polygon_to_mesh(
             covered_area = coverage_polygon.intersection(cell).area
             if covered_area < min_cell_area:
                 continue
-            top_left = vertex_index(x0, z0)
-            top_right = vertex_index(x1, z0)
-            bottom_left = vertex_index(x0, z1)
-            bottom_right = vertex_index(x1, z1)
+            cell_x0 = max(x0, min_x)
+            cell_x1 = min(x1, max_x)
+            cell_z0 = max(z0, min_z)
+            cell_z1 = min(z1, max_z)
+            if cell_x1 - cell_x0 <= 0.001 or cell_z1 - cell_z0 <= 0.001:
+                continue
+            top_left = vertex_index(cell_x0, cell_z0)
+            top_right = vertex_index(cell_x1, cell_z0)
+            bottom_left = vertex_index(cell_x0, cell_z1)
+            bottom_right = vertex_index(cell_x1, cell_z1)
             faces.append([top_left, top_right, bottom_right, bottom_left])
 
     if faces:
