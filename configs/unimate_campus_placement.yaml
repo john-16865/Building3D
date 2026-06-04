@@ -1,0 +1,17 @@
+campus_scene: res://Scene/Campus/CampusMain.tscn
+buildings_parent: GameLayer/HBox/VBoxContainer/ViewportContainer/SubViewport/Buildings
+scene_template: res://Scene/{building_id}_baked_full.tscn
+
+reference:
+  building_id: science
+  lon: 174.76818825
+  lat: -36.852228925
+  local_anchor: [-18.06752, 0.0, 119.648]
+  origin: [-162.63676, 0.45404053, 860.31226]
+  scale: 0.89260983
+
+entrance_marker:
+  name: Entrance
+  size: [30.0, 30.0, 30.0]
+
+overrides: {}

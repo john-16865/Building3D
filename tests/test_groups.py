@@ -15,6 +15,7 @@ from building3d.groups import (
     _sync_nav_node_names,
     generate_group,
 )
+from building3d.normalize import FloorRecord, NormalizedDataset, PortalRecord
 from building3d.unimate import _navigation_mesh_resources
 
 
@@ -62,6 +63,13 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert manifest["external_doors"][0]["node_name"] == "MainDoor"
     assert manifest["external_doors"][0]["kind"] == "door"
     assert manifest["external_doors"][0]["anchor"] == [1.0, 0.0, 2.0]
+    topology = json.loads((export_dir / "science_portal_topology.json").read_text(encoding="utf-8"))
+    assert topology["building_id"] == "science"
+    assert topology["validation"]["terminal_count"] == 2
+    assert topology["terminals"][0]["portal_name"] == "MainDoor"
+    assert topology["terminals"][1]["portal_name"] == "302 100E1_Elevator_SetE1"
+    assert manifest["assets"]["portal_topology"] == "science_portal_topology.json"
+    assert result["artifacts"]["portal_topology"] == str(export_dir / "science_portal_topology.json")
     assert manifest["nav"]["building_entries"][0]["node_name"] == "MainDoor"
     assert any(link["kind"] == "walk" for link in manifest["nav"]["links"])
     assert manifest["nav"]["room_targets"][0]["logical_building_id"] == "science"
@@ -80,6 +88,39 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert "302 100E1_Elevator_SetE1" in scene_text
     assert '[node name="MainDoor" type="Node3D" parent="Floors/Floor0/Rooms"]' in scene_text
     assert json.loads((export_dir / "external_doors.json").read_text(encoding="utf-8"))[0]["node_name"] == "MainDoor"
+
+
+def test_external_door_ids_are_normalized_to_group_id():
+    group = BuildingGroupConfig(
+        id="business",
+        display_name="Business School OGGB",
+        members=["260"],
+        aliases=["business", "260"],
+        primary_member="260",
+    )
+
+    door = groups._normalise_external_door(
+        {
+            "entry_id": "science_entry_001",
+            "external_id": "science_entry_001",
+            "floor_name": "G",
+            "local": [11.584154, 0.0, 72.913164],
+            "source": "route_abutters_outside_to_inside",
+            "confidence": "high",
+            "supporting_routes": 33,
+        },
+        1,
+        group,
+        {"G": 5},
+    )
+
+    assert door is not None
+    assert door["entry_id"] == "business_entry_001"
+    assert door["external_id"] == "business_entry_001"
+    assert door["source_id"] == "business_entry_001"
+    assert door["source_entry_id"] == "science_entry_001"
+    assert door["source_external_id"] == "science_entry_001"
+    assert door["aliases"][0] == "business_entry_001"
 
 
 def test_generate_group_can_filter_to_one_member_and_one_floor_from_source(tmp_path):
@@ -130,6 +171,159 @@ def test_generate_group_can_filter_to_one_member_and_one_floor_from_source(tmp_p
     assert 'floor_name = "G"' in scene_text
     assert "301 001_Teaching Lab" in scene_text
     assert "302 100E1_Elevator_SetE1" not in scene_text
+
+
+def test_group_manifest_derives_unknown_vertical_links_for_godot(monkeypatch, tmp_path):
+    dataset = NormalizedDataset(
+        building_id="science",
+        building_admin_id="303",
+        building_name="Science Centre",
+        floors=[
+            FloorRecord("8", 10, 33.6),
+            FloorRecord("M8", 11, 35.7),
+        ],
+        portals=[
+            _unknown_elevator(
+                "303-802",
+                "feature-802",
+                "8",
+                10,
+                80,
+                [174.767831, -36.852784],
+                [0.0, 33.6, 0.0],
+            ),
+            _unknown_elevator(
+                "303-8U02",
+                "feature-8U02",
+                "M8",
+                11,
+                85,
+                [174.7678313, -36.8527782],
+                [0.1, 35.7, 0.1],
+            ),
+        ],
+    )
+    group = BuildingGroupConfig(
+        id="science",
+        display_name="Science Centre",
+        members=["303"],
+        aliases=["science", "science centre"],
+        primary_member="303",
+    )
+    processed_dir = tmp_path / "processed" / "groups" / "science"
+    export_dir = tmp_path / "exports" / "groups" / "science"
+    processed_dir.mkdir(parents=True)
+    export_dir.mkdir(parents=True)
+    monkeypatch.setattr(groups, "MapsIndoorsRouteClient", _FakeMapsIndoorsRouteClient)
+
+    manifest = groups._build_group_manifest(
+        dataset,
+        group,
+        [_record("303-science", "303", [174.0, -36.0])],
+        processed_dir,
+        export_dir,
+    )
+
+    route_links = [
+        link
+        for link in manifest["nav"]["links"]
+        if link.get("source") == "mapsindoors_route_graph"
+    ]
+    assert [(link["from_external_id"], link["to_external_id"]) for link in route_links] == [
+        ("303-802", "303-8U02")
+    ]
+    assert route_links[0]["group_id"] == "MI_303_ELEV_001"
+    assert manifest["portals"][0]["node_name"] == "303 802_Elevator_SetMI_303_ELEV_001"
+    assert manifest["portals"][1]["node_name"] == "303 8U02_Elevator_SetMI_303_ELEV_001"
+    assert manifest["nav"]["vertical_route_derivation"] == {
+        "accepted": 1,
+        "candidates": 1,
+        "graph_id": "CITY_CAMPUS_Graph",
+        "rejected": 0,
+    }
+    derived = json.loads((export_dir / "science_vertical_links_route_derived.json").read_text(encoding="utf-8"))
+    assert derived["accepted"] == 1
+
+
+def test_group_manifest_keeps_route_derivation_summary_after_rebuild(monkeypatch, tmp_path):
+    portals = [
+        _unknown_elevator(
+            "303-802",
+            "feature-802",
+            "8",
+            10,
+            80,
+            [174.767831, -36.852784],
+            [0.0, 33.6, 0.0],
+        ),
+        _unknown_elevator(
+            "303-8U02",
+            "feature-8U02",
+            "M8",
+            11,
+            85,
+            [174.7678313, -36.8527782],
+            [0.1, 35.7, 0.1],
+        ),
+    ]
+    for portal in portals:
+        portal.group_id = "MI_303_ELEV_001"
+        portal.source_properties["vertical_group_source"] = "mapsindoors_route_graph"
+        portal.source_properties["vertical_group_confidence"] = "high"
+    dataset = NormalizedDataset(
+        building_id="science",
+        building_admin_id="303",
+        building_name="Science Centre",
+        floors=[
+            FloorRecord("8", 10, 33.6),
+            FloorRecord("M8", 11, 35.7),
+        ],
+        portals=portals,
+    )
+    group = BuildingGroupConfig(
+        id="science",
+        display_name="Science Centre",
+        members=["303"],
+        aliases=["science", "science centre"],
+        primary_member="303",
+    )
+    processed_dir = tmp_path / "processed" / "groups" / "science"
+    export_dir = tmp_path / "exports" / "groups" / "science"
+    processed_dir.mkdir(parents=True)
+    export_dir.mkdir(parents=True)
+
+    class NoRouteCalls:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def route(self, origin, destination):
+            raise AssertionError("route client should not be called for already grouped MI portals")
+
+    monkeypatch.setattr(groups, "MapsIndoorsRouteClient", NoRouteCalls)
+
+    manifest = groups._build_group_manifest(
+        dataset,
+        group,
+        [_record("303-science", "303", [174.0, -36.0])],
+        processed_dir,
+        export_dir,
+    )
+
+    route_links = [
+        link
+        for link in manifest["nav"]["links"]
+        if link.get("source") == "mapsindoors_route_graph"
+    ]
+    assert [(link["from_external_id"], link["to_external_id"]) for link in route_links] == [
+        ("303-802", "303-8U02")
+    ]
+    assert manifest["nav"]["vertical_route_derivation"] == {
+        "accepted": 1,
+        "candidates": 0,
+        "graph_id": "CITY_CAMPUS_Graph",
+        "rejected": 0,
+    }
+    assert not (export_dir / "science_vertical_links_route_derived.json").exists()
 
 
 def test_group_node_names_are_deduped_per_floor():
@@ -1792,6 +1986,75 @@ def _record(slug, admin_id, origin):
         default_floor="0",
         floor_keys=["0"],
         source_urls=[f"https://example.test/locations?building={admin_id}"],
+    )
+
+
+class _FakeMapsIndoorsRouteClient:
+    def __init__(self, **_kwargs):
+        pass
+
+    def route(self, origin, destination):
+        return {
+            "status": "OK",
+            "routes": [
+                {
+                    "legs": [
+                        {
+                            "steps": [
+                                {
+                                    "geometry": [
+                                        {
+                                            "lng": 174.7678329,
+                                            "lat": -36.8527891,
+                                            "zLevel": origin.zlevel,
+                                            "floor_name": origin.floor_name,
+                                        },
+                                        {
+                                            "lng": 174.7678329,
+                                            "lat": -36.8527891,
+                                            "zLevel": destination.zlevel,
+                                            "floor_name": destination.floor_name,
+                                        },
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+
+
+def _unknown_elevator(
+    external_id,
+    source_id,
+    floor_name,
+    floor_index,
+    source_floor,
+    anchor_lonlat,
+    anchor_local,
+):
+    lon, lat = anchor_lonlat
+    return PortalRecord(
+        source_id=source_id,
+        external_id=external_id,
+        display_name="Elevator",
+        building_admin_id="303",
+        floor_name=floor_name,
+        floor_index=floor_index,
+        kind="elevator",
+        group_id="",
+        anchor_lonlat=anchor_lonlat,
+        anchor_local=anchor_local,
+        polygon_lonlat=[
+            [lon - 0.00002, lat - 0.00002],
+            [lon + 0.00002, lat - 0.00002],
+            [lon + 0.00002, lat + 0.00002],
+            [lon - 0.00002, lat + 0.00002],
+            [lon - 0.00002, lat - 0.00002],
+        ],
+        polygon_local=[],
+        source_properties={"floor": str(source_floor)},
     )
 
 

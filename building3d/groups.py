@@ -29,8 +29,10 @@ from building3d.gltf import write_glb
 from building3d.manifest import build_manifest, refresh_generation_hash, write_manifest
 from building3d.mapsindoors import fetch_source_data, load_raw_locations, source_urls
 from building3d.normalize import FloorRecord, NormalizedDataset, normalize_locations
+from building3d.portal_topology import build_portal_topology, write_portal_topology
 from building3d.projection import LocalProjector, project_dataset
 from building3d.unimate import write_unimate_scene
+from building3d.vertical_links import DEFAULT_GRAPH_ID, MapsIndoorsRouteClient, apply_route_derived_vertical_links
 
 
 ROUTE_NAV_CORRIDOR_RADIUS = 0.6
@@ -159,9 +161,11 @@ def generate_group(
     if route_nav_stats:
         route_nav_stats["route_wall_openings"] = _route_wall_opening_stats(route_wall_openings)
         manifest.setdefault("nav", {})["validation"] = route_nav_stats
+    portal_topology_file = f"{group.id}_portal_topology.json"
     manifest["assets"] = {
         "visual_glb": names.visual_glb,
         "nav_glb": names.nav_glb,
+        "portal_topology": portal_topology_file,
         "floor_visual_glbs": [
             {
                 "floor_index": int(floor.get("floor_index", 0)),
@@ -191,6 +195,10 @@ def generate_group(
         ],
     }
     manifest = refresh_generation_hash(manifest)
+    portal_topology = build_portal_topology(
+        manifest,
+        route_navigation_meshes,
+    )
     floor_visual_paths = {
         floor_index: f"{_unimate_asset_base(group)}/{filename}"
         for floor_index, filename in floor_visual_files.items()
@@ -205,6 +213,8 @@ def generate_group(
     if manifest.get("external_doors"):
         _write_json(processed_dir / "external_doors.json", manifest["external_doors"])
         _write_json(export_dir / "external_doors.json", manifest["external_doors"])
+    write_portal_topology(portal_topology, processed_dir / portal_topology_file)
+    write_portal_topology(portal_topology, export_dir / portal_topology_file)
     write_manifest(manifest, processed_dir / names.manifest)
     write_glb(visual_meshes_from_meshes(meshes), export_dir / names.visual_glb)
     write_glb(navigation_meshes_from_meshes(scene_navigation_meshes), export_dir / names.nav_glb)
@@ -233,6 +243,7 @@ def generate_group(
             "walkable_path_glbs": [str(export_dir / filename) for filename in floor_walkable_path_files.values()],
             "route_debug_glbs": [str(export_dir / filename) for filename in floor_route_debug_files.values()],
             "manifest": str(export_dir / names.manifest),
+            "portal_topology": str(export_dir / portal_topology_file),
             "scene": str(scene_path),
             "readme": str(export_dir / names.readme),
         },
@@ -476,8 +487,17 @@ def _build_group_manifest(
     if external_doors:
         manifest["external_doors"] = external_doors
     _apply_room_navigation_anchors(manifest, processed_dir, export_dir, group)
+    vertical_link_stats = apply_route_derived_vertical_links(
+        dataset,
+        manifest,
+        route_client=MapsIndoorsRouteClient(cache_dir=export_dir / "vertical_route_cache"),
+    )
+    if int(vertical_link_stats.get("candidates", 0)) > 0:
+        _write_json(processed_dir / f"{group.id}_vertical_links_route_derived.json", vertical_link_stats)
+        _write_json(export_dir / f"{group.id}_vertical_links_route_derived.json", vertical_link_stats)
     _dedupe_node_names(manifest)
     _sync_nav_node_names(manifest)
+    _ensure_vertical_route_derivation_summary(manifest, vertical_link_stats)
     _add_same_floor_walk_links(manifest, wall_blockers_by_floor=wall_blockers_by_floor)
     return refresh_generation_hash(manifest)
 
@@ -1562,7 +1582,9 @@ def _normalise_external_door(
     if not _valid_local_anchor(anchor):
         return None
 
-    entry_id = str(item.get("entry_id") or item.get("external_id") or f"{group.id}_entry_{index:03d}")
+    source_entry_id = str(item.get("entry_id") or item.get("external_id") or "").strip()
+    source_external_id = str(item.get("external_id") or item.get("entry_id") or "").strip()
+    entry_id = f"{group.id}_entry_{index:03d}"
     floor_name = _canonical_floor_name(str(item.get("floor_name") or "G"))
     floor_index = floor_index_by_name.get(floor_name.upper())
     if floor_index is None:
@@ -1591,6 +1613,8 @@ def _normalise_external_door(
         "target_external_ids": list(item.get("target_external_ids") or []),
         "source_building_admin_id": ",".join(group.members),
         "source_id": entry_id,
+        "source_entry_id": source_entry_id or entry_id,
+        "source_external_id": source_external_id or entry_id,
     }
 
 
@@ -2152,6 +2176,25 @@ def _sync_nav_node_names(manifest: dict[str, Any]) -> None:
     ]
 
 
+def _ensure_vertical_route_derivation_summary(manifest: dict[str, Any], stats: dict[str, Any]) -> None:
+    nav = manifest.setdefault("nav", {})
+    if nav.get("vertical_route_derivation"):
+        return
+    route_links = [
+        link
+        for link in nav.get("links", [])
+        if isinstance(link, dict) and str(link.get("source", "")) == "mapsindoors_route_graph"
+    ]
+    if not route_links:
+        return
+    nav["vertical_route_derivation"] = {
+        "graph_id": str(stats.get("graph_id") or DEFAULT_GRAPH_ID),
+        "candidates": int(stats.get("candidates", 0)),
+        "accepted": len(route_links),
+        "rejected": int(stats.get("rejected", 0)),
+    }
+
+
 def _deduped_node_name(node_name: str, suffix: str) -> str:
     set_match = re.search(r"_Set\w+$", node_name)
     if set_match:
@@ -2397,6 +2440,7 @@ Generated by Building3D as a UNIMATE-ready logical building group.
 - `{names.nav_glb}`: simplified navigation/anchor geometry.
 - `{group.id}_floor_<index>_visual.glb`: per-floor visual geometry used by UNIMATE floor controls.
 - `{names.manifest}`: group manifest with room nodes, aliases, portals, external doors, and provenance.
+- `{group.id}_portal_topology.json`: exact portal terminals plus proven same-floor and vertical portal edges for Godot routing.
 - `external_doors.json`: route-derived building entry/exit markers, when available.
 - `{scene_filename}`: generated Godot scene matching UNIMATE's `BuildingController`/`FloorController` room-node contract.
 
