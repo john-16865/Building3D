@@ -140,6 +140,11 @@ def apply_route_derived_vertical_links(
         "links": [],
         "rejections": [],
     }
+    # Portals grouped by a previous derivation are re-linked from their existing
+    # group ids alone, so a rebuild never needs to hit MapsIndoors again. Captured
+    # before the API pass so freshly assigned groups are not double counted.
+    pre_derived_edges = _already_derived_vertical_edges(dataset)
+
     accepted_edges: list[dict[str, Any]] = []
     for start, end in _candidate_pairs(unknown_portals):
         stats["candidates"] += 1
@@ -156,11 +161,11 @@ def apply_route_derived_vertical_links(
             continue
         accepted_edges.append({"start": start, "end": end, "transition": transition})
 
-    if not accepted_edges:
+    if not accepted_edges and not pre_derived_edges:
         _write_manifest_summary(manifest, stats)
         return stats
 
-    group_ids = _assign_component_group_ids(accepted_edges)
+    group_ids = _assign_component_group_ids(accepted_edges) if accepted_edges else {}
     portals_by_source_id = {portal.source_id: portal for portal in dataset.portals}
     manifest_portals_by_source_id = {
         str(portal.get("source_id")): portal
@@ -185,43 +190,22 @@ def apply_route_derived_vertical_links(
 
     links = manifest.setdefault("nav", {}).setdefault("links", [])
     existing = _existing_vertical_edge_keys(links)
-    for edge in accepted_edges:
-        start = edge["start"]
-        end = edge["end"]
-        group_id = group_ids[start.source_id]
+    combined_edges = [
+        (edge["start"], edge["end"], group_ids[edge["start"].source_id], edge["transition"])
+        for edge in accepted_edges
+    ] + [
+        (edge["start"], edge["end"], edge["group_id"], edge["transition"])
+        for edge in pre_derived_edges
+    ]
+    for start, end, group_id, transition in combined_edges:
         key = _edge_key(start.kind, start.source_id, end.source_id)
         reverse_key = _edge_key(start.kind, end.source_id, start.source_id)
         if key in existing or reverse_key in existing:
             continue
         existing.add(key)
-        transition = edge["transition"]
-        start_manifest = manifest_portals_by_source_id[start.source_id]
-        end_manifest = manifest_portals_by_source_id[end.source_id]
-        link = {
-            "kind": start.kind,
-            "group_id": group_id,
-            "source": "mapsindoors_route_graph",
-            "confidence": "high",
-            "source_building_admin_id": start.building_admin_id,
-            "from_external_id": start.external_id,
-            "to_external_id": end.external_id,
-            "from_source_id": start.source_id,
-            "to_source_id": end.source_id,
-            "from_node_name": start_manifest.get("node_name", ""),
-            "to_node_name": end_manifest.get("node_name", ""),
-            "from_floor_index": start.floor_index,
-            "to_floor_index": end.floor_index,
-            "from_anchor": start.anchor_local,
-            "to_anchor": end.anchor_local,
-            "from_source_floor": _source_floor(start),
-            "to_source_floor": _source_floor(end),
-            "transition": {
-                "from": [transition.from_point.lon, transition.from_point.lat, transition.from_point.zlevel],
-                "to": [transition.to_point.lon, transition.to_point.lat, transition.to_point.zlevel],
-            },
-            "bidirectional": True,
-        }
-        links.append(link)
+        start_manifest = manifest_portals_by_source_id.get(start.source_id, {})
+        end_manifest = manifest_portals_by_source_id.get(end.source_id, {})
+        links.append(_build_vertical_link(start, end, group_id, transition, start_manifest, end_manifest))
         stats["accepted"] += 1
         stats["links"].append(
             {
@@ -235,6 +219,71 @@ def apply_route_derived_vertical_links(
 
     _write_manifest_summary(manifest, stats)
     return stats
+
+
+def _already_derived_vertical_edges(dataset: NormalizedDataset) -> list[dict[str, Any]]:
+    """Vertical edges for portals already grouped by a prior route derivation.
+
+    Rebuilds the floor-to-floor links from the portals' existing route-derived
+    group ids so a regeneration keeps the same links without any API calls.
+    """
+    marked = [
+        portal
+        for portal in dataset.portals
+        if portal.kind in {"elevator", "stair"}
+        and str((portal.source_properties or {}).get("vertical_group_source", "")) == "mapsindoors_route_graph"
+        and _is_linkable_vertical_group(portal.group_id)
+    ]
+    by_group: dict[str, list[PortalRecord]] = {}
+    for portal in marked:
+        by_group.setdefault(str(portal.group_id), []).append(portal)
+    edges: list[dict[str, Any]] = []
+    for _group_id, portals in sorted(by_group.items()):
+        per_floor: dict[int, PortalRecord] = {}
+        for portal in sorted(portals, key=lambda item: (str(item.external_id), str(item.source_id))):
+            per_floor.setdefault(int(portal.floor_index), portal)
+        ordered = [per_floor[index] for index in sorted(per_floor)]
+        for lower, upper in zip(ordered, ordered[1:]):
+            if lower.floor_index == upper.floor_index:
+                continue
+            edges.append({"start": lower, "end": upper, "group_id": str(lower.group_id), "transition": None})
+    return edges
+
+
+def _build_vertical_link(
+    start: PortalRecord,
+    end: PortalRecord,
+    group_id: str,
+    transition: _Transition | None,
+    start_manifest: dict[str, Any],
+    end_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    link: dict[str, Any] = {
+        "kind": start.kind,
+        "group_id": group_id,
+        "source": "mapsindoors_route_graph",
+        "confidence": "high",
+        "source_building_admin_id": start.building_admin_id,
+        "from_external_id": start.external_id,
+        "to_external_id": end.external_id,
+        "from_source_id": start.source_id,
+        "to_source_id": end.source_id,
+        "from_node_name": start_manifest.get("node_name", ""),
+        "to_node_name": end_manifest.get("node_name", ""),
+        "from_floor_index": start.floor_index,
+        "to_floor_index": end.floor_index,
+        "from_anchor": start.anchor_local,
+        "to_anchor": end.anchor_local,
+        "from_source_floor": _source_floor(start),
+        "to_source_floor": _source_floor(end),
+        "bidirectional": True,
+    }
+    if transition is not None:
+        link["transition"] = {
+            "from": [transition.from_point.lon, transition.from_point.lat, transition.from_point.zlevel],
+            "to": [transition.to_point.lon, transition.to_point.lat, transition.to_point.zlevel],
+        }
+    return link
 
 
 def _candidate_pairs(portals: list[PortalRecord]) -> list[tuple[PortalRecord, PortalRecord]]:

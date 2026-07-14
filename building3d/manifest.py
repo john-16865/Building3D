@@ -102,10 +102,41 @@ def _hash_manifest(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# Vertical portal groups whose id does not identify a real shaft. Portals in
+# these groups are not linked floor-to-floor by the static manifest; their true
+# connections are discovered by building3d.vertical_links from the MapsIndoors
+# route graph. Kept in sync with portal_topology.UNKNOWN_GROUP_IDS.
+UNLINKABLE_VERTICAL_GROUP_IDS = {"", "DEFAULT", "MAIN"}
+
+
+def _is_linkable_vertical_group(group_id: str) -> bool:
+    """True when a stair/elevator group id identifies a real shaft to link.
+
+    Real shaft ids (``S4``, ``E3``) and route-derived ids (``MI_303_ELEV_001``)
+    are linkable. Placeholder ids (``""``, ``DEFAULT``, ``MAIN``) are left for
+    route-graph derivation instead of being naively lumped into one shaft.
+    """
+    return str(group_id or "").strip().upper() not in UNLINKABLE_VERTICAL_GROUP_IDS
+
+
+def _is_route_derived_portal(portal) -> bool:
+    """True when a portal's vertical group came from the MapsIndoors route graph.
+
+    Those links are (re)emitted by building3d.vertical_links with the route-graph
+    source tag, so the static manifest must not also link them here.
+    """
+    props = getattr(portal, "source_properties", None) or {}
+    return str(props.get("vertical_group_source", "")) == "mapsindoors_route_graph"
+
+
 def _nav_links(portals) -> list[dict[str, Any]]:
     by_group: dict[tuple[str, str, str], list] = {}
     for portal in portals:
         if portal.kind not in {"stair", "elevator"}:
+            continue
+        if not _is_linkable_vertical_group(portal.group_id):
+            continue
+        if _is_route_derived_portal(portal):
             continue
         by_group.setdefault(_portal_shaft_key(portal), []).append(portal)
 

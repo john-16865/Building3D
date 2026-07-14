@@ -111,11 +111,106 @@ class RouteClient:
         return data
 
 
+def derive_group_door_points(
+    *,
+    dataset_path: Path,
+    inventory_path: Path,
+    output_dir: Path,
+    group_id: str = "science",
+    display_name: str = "",
+    graph_id: str = "CITY_CAMPUS_Graph",
+    primary_member: str = "302",
+    max_rooms: int = 0,
+    workers: int = 4,
+    delay: float = 0.03,
+    origin_tries: int = 5,
+    entry_targets_per_member: int = 3,
+    skip_rooms: bool = False,
+    skip_external: bool = False,
+) -> dict[str, Any]:
+    """Derive route-based room door points and external entries for one group.
+
+    Writes ``{group_id}_room_door_points_route_derived.json`` (+ csv), the
+    ``{group_id}_external_entry_points_route_derived.json`` (+ csv),
+    ``external_doors.json``, and the ``door_route_cache/`` consumed by
+    ``building3d.groups.generate_group``. Returns a small stats dict.
+    """
+    dataset_path = Path(dataset_path)
+    inventory_path = Path(inventory_path)
+    output_dir = Path(output_dir)
+    display_name = display_name or group_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = output_dir / "door_route_cache"
+
+    dataset = _read_json(dataset_path)
+    inventory = _read_json(inventory_path)
+    origin_lon, origin_lat = _group_origin(inventory, primary_member)
+    projector = LocalProjector(origin_lon, origin_lat)
+    client = RouteClient(graph_id, cache_dir, delay)
+
+    rooms = [room for room in dataset.get("rooms", []) if _room_is_usable_target(room)]
+    if max_rooms > 0:
+        rooms = rooms[:max_rooms]
+    origins = _origin_candidates(dataset)
+
+    print(f"{display_name} room targets: {len(rooms)}", flush=True)
+    print(f"Origin candidates: {len(origins)}", flush=True)
+    print(f"Route cache: {cache_dir}", flush=True)
+
+    room_rows: list[dict[str, Any]] = []
+    room_json = output_dir / f"{group_id}_room_door_points_route_derived.json"
+    if skip_rooms and room_json.exists():
+        room_rows = _read_json(room_json)
+    elif not skip_rooms:
+        room_rows = _derive_room_doors(
+            rooms=rooms,
+            origins=origins,
+            client=client,
+            projector=projector,
+            origin_tries=origin_tries,
+            workers=max(1, workers),
+        )
+        _write_json(room_json, room_rows)
+        _write_csv(output_dir / f"{group_id}_room_door_points_route_derived.csv", room_rows)
+
+    entry_rows: list[dict[str, Any]] = []
+    entry_json = output_dir / f"{group_id}_external_entry_points_route_derived.json"
+    if skip_external and entry_json.exists():
+        entry_rows = _read_json(entry_json)
+    elif not skip_external:
+        entry_rows = _derive_building_entries(dataset, client, projector, entry_targets_per_member, entry_prefix=group_id)
+        _write_json(entry_json, entry_rows)
+        _write_csv(output_dir / f"{group_id}_external_entry_points_route_derived.csv", entry_rows)
+    if entry_rows:
+        _write_json(output_dir / "external_doors.json", entry_rows)
+
+    report_path = output_dir / f"{group_id}_door_research.md"
+    _write_report(report_path, dataset_path, graph_id, room_rows, entry_rows, group_id=group_id, display_name=display_name)
+    if room_rows:
+        print(f"Wrote {room_json}", flush=True)
+    if entry_rows:
+        print(f"Wrote {entry_json}", flush=True)
+    print(f"Wrote {report_path}", flush=True)
+    return {
+        "group_id": group_id,
+        "rooms": len(room_rows),
+        "room_doors": len([row for row in room_rows if row.get("door_source") != "failed"]),
+        "entries": len(entry_rows),
+        "room_json": str(room_json),
+        "entry_json": str(entry_json),
+        "external_doors": str(output_dir / "external_doors.json") if entry_rows else "",
+        "cache_dir": str(cache_dir),
+        "report": str(report_path),
+    }
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Derive Science Centre door points from MapsIndoors route geometry.")
+    parser = argparse.ArgumentParser(description="Derive building-group door points from MapsIndoors route geometry.")
     parser.add_argument("--dataset", default="data/processed/auckland/groups/science/dataset.json")
     parser.add_argument("--inventory", default="data/processed/auckland/inventory.json")
     parser.add_argument("--output-dir", default="exports/auckland/groups/science")
+    parser.add_argument("--group-id", default="science", help="Output filename prefix and logical group id.")
+    parser.add_argument("--display-name", default="", help="Human name used in the derivation report.")
     parser.add_argument("--graph-id", default="CITY_CAMPUS_Graph")
     parser.add_argument("--primary-member", default="302")
     parser.add_argument("--max-rooms", type=int, default=0, help="Limit room targets for a quick probe. 0 means all.")
@@ -127,61 +222,22 @@ def main() -> int:
     parser.add_argument("--entry-targets-per-member", type=int, default=3)
     args = parser.parse_args()
 
-    dataset_path = Path(args.dataset)
-    inventory_path = Path(args.inventory)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = output_dir / "door_route_cache"
-
-    dataset = _read_json(dataset_path)
-    inventory = _read_json(inventory_path)
-    origin_lon, origin_lat = _group_origin(inventory, args.primary_member)
-    projector = LocalProjector(origin_lon, origin_lat)
-    client = RouteClient(args.graph_id, cache_dir, args.delay)
-
-    rooms = [room for room in dataset.get("rooms", []) if _room_is_usable_target(room)]
-    if args.max_rooms > 0:
-        rooms = rooms[: args.max_rooms]
-    origins = _origin_candidates(dataset)
-
-    print(f"Science room targets: {len(rooms)}", flush=True)
-    print(f"Origin candidates: {len(origins)}", flush=True)
-    print(f"Route cache: {cache_dir}", flush=True)
-
-    room_rows: list[dict[str, Any]] = []
-    room_json = output_dir / "science_room_door_points_route_derived.json"
-    if args.skip_rooms and room_json.exists():
-        room_rows = _read_json(room_json)
-    elif not args.skip_rooms:
-        room_rows = _derive_room_doors(
-            rooms=rooms,
-            origins=origins,
-            client=client,
-            projector=projector,
-            origin_tries=args.origin_tries,
-            workers=max(1, args.workers),
-        )
-        _write_json(room_json, room_rows)
-        _write_csv(output_dir / "science_room_door_points_route_derived.csv", room_rows)
-
-    entry_rows: list[dict[str, Any]] = []
-    entry_json = output_dir / "science_external_entry_points_route_derived.json"
-    if args.skip_external and entry_json.exists():
-        entry_rows = _read_json(entry_json)
-    elif not args.skip_external:
-        entry_rows = _derive_building_entries(dataset, client, projector, args.entry_targets_per_member)
-        _write_json(entry_json, entry_rows)
-        _write_csv(output_dir / "science_external_entry_points_route_derived.csv", entry_rows)
-    if entry_rows:
-        _write_json(output_dir / "external_doors.json", entry_rows)
-
-    report_path = output_dir / "science_door_research.md"
-    _write_report(report_path, dataset_path, args.graph_id, room_rows, entry_rows)
-    if room_rows:
-        print(f"Wrote {output_dir / 'science_room_door_points_route_derived.json'}", flush=True)
-    if entry_rows:
-        print(f"Wrote {output_dir / 'science_external_entry_points_route_derived.json'}", flush=True)
-    print(f"Wrote {report_path}", flush=True)
+    derive_group_door_points(
+        dataset_path=Path(args.dataset),
+        inventory_path=Path(args.inventory),
+        output_dir=Path(args.output_dir),
+        group_id=args.group_id,
+        display_name=args.display_name,
+        graph_id=args.graph_id,
+        primary_member=args.primary_member,
+        max_rooms=args.max_rooms,
+        workers=args.workers,
+        delay=args.delay,
+        origin_tries=args.origin_tries,
+        entry_targets_per_member=args.entry_targets_per_member,
+        skip_rooms=args.skip_rooms,
+        skip_external=args.skip_external,
+    )
     return 0
 
 
@@ -390,6 +446,7 @@ def _derive_building_entries(
     client: RouteClient,
     projector: LocalProjector,
     entry_targets_per_member: int,
+    entry_prefix: str = "science",
 ) -> list[dict[str, Any]]:
     details = client.graph_details()
     entry_points = [
@@ -435,7 +492,7 @@ def _derive_building_entries(
                         "target_floor_name": target.get("floor_name", ""),
                     }
                 )
-    clusters = _cluster_entry_observations([item for item in observations if item.get("status") == "OK"])
+    clusters = _cluster_entry_observations([item for item in observations if item.get("status") == "OK"], entry_prefix=entry_prefix)
     failed = len([item for item in observations if item.get("status") != "OK"])
     print(f"external entry observations: {len(observations) - failed} OK, {failed} failed, {len(clusters)} clustered points", flush=True)
     return clusters
@@ -642,7 +699,7 @@ def _outside_to_inside_points(route: dict[str, Any]) -> list[RoutePoint]:
     return points
 
 
-def _cluster_entry_observations(observations: list[dict[str, Any]], radius_m: float = 1.2) -> list[dict[str, Any]]:
+def _cluster_entry_observations(observations: list[dict[str, Any]], radius_m: float = 1.2, entry_prefix: str = "science") -> list[dict[str, Any]]:
     clusters: list[dict[str, Any]] = []
     for observation in observations:
         local = observation.get("local") or []
@@ -673,7 +730,7 @@ def _cluster_entry_observations(observations: list[dict[str, Any]], radius_m: fl
         ]
         rows.append(
             {
-                "entry_id": f"science_entry_{index:03d}",
+                "entry_id": f"{entry_prefix}_entry_{index:03d}",
                 "lon": round(lon, 12),
                 "lat": round(lat, 12),
                 "source_floor": _common_value(items, "source_floor"),
@@ -910,30 +967,38 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow(item)
 
 
-def _write_report(path: Path, dataset_path: Path, graph_id: str, rooms: list[dict[str, Any]], entries: list[dict[str, Any]]) -> None:
+def _write_report(
+    path: Path,
+    dataset_path: Path,
+    graph_id: str,
+    rooms: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+    group_id: str = "science",
+    display_name: str = "Science Centre",
+) -> None:
     successful = [room for room in rooms if room.get("door_source") != "failed"]
     high = [room for room in rooms if room.get("confidence") == "high"]
     medium = [room for room in rooms if room.get("confidence") == "medium"]
     failed = [room for room in rooms if room.get("door_source") == "failed"]
     top_entries = sorted(entries, key=lambda item: -int(item.get("supporting_routes", 0)))[:20]
     lines = [
-        "# Science Centre Door Research",
+        f"# {display_name} Door Research",
         "",
         f"Generated from `{dataset_path}` and MapsIndoors directions graph `{graph_id}`.",
         "",
         "## Method",
         "",
-        "- The cached Science location data does not expose semantic door objects.",
+        f"- The cached {display_name} location data does not expose semantic door objects.",
         "- Room door points are derived by requesting a MapsIndoors walking route to each room anchor, then intersecting the final route segment with the target room polygon boundary.",
         "- External building entries are derived from the MapsIndoors route step where `abutters` changes from outside routing to `InsideBuilding`.",
         "- Outputs are route-derived entry points, not official architectural door assets.",
         "",
         "## Outputs",
         "",
-        "- `science_room_door_points_route_derived.json`",
-        "- `science_room_door_points_route_derived.csv`",
-        "- `science_external_entry_points_route_derived.json`",
-        "- `science_external_entry_points_route_derived.csv`",
+        f"- `{group_id}_room_door_points_route_derived.json`",
+        f"- `{group_id}_room_door_points_route_derived.csv`",
+        f"- `{group_id}_external_entry_points_route_derived.json`",
+        f"- `{group_id}_external_entry_points_route_derived.csv`",
         "- `external_doors.json`",
         "",
         "## Result Summary",
@@ -943,7 +1008,7 @@ def _write_report(path: Path, dataset_path: Path, graph_id: str, rooms: list[dic
         f"- High-confidence room boundary intersections: {len(high)}",
         f"- Medium-confidence room boundary fallbacks: {len(medium)}",
         f"- Failed room targets: {len(failed)}",
-        f"- External Science entry clusters: {len(entries)}",
+        f"- External {display_name} entry clusters: {len(entries)}",
         "",
         "## External Entry Clusters",
         "",

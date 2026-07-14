@@ -46,3 +46,22 @@ groups:
       - science_test
       - "303"
 
+  - id: art
+    display_name: Elam School of Fine Arts
+    primary_member: "431"
+    members:
+      - "431"
+      - "432"
+      - "433"
+    aliases:
+      - art
+      - arts
+      - elam
+      - fine arts
+      - fine_arts
+      - fine arts studio
+      - elam school of fine arts
+      - "431"
+      - "432"
+      - "433"
+
