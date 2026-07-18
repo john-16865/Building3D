@@ -241,12 +241,16 @@ def _category(name: str, source_type: str) -> str:
 
 
 def _portal_kind(name: str, source_type: str, external_id: str) -> str:
-    text = f"{name} {source_type} {external_id}".lower()
-    if "elevator" in text or "lift" in text or re.search(r"e\d+$", external_id, re.IGNORECASE):
+    # Classify only on the location TYPE and the campus portal id convention
+    # ("...E1"/"...S2"). Room names routinely contain portal words without
+    # being portals ("Folding Door Storage", "Lift Lobby", "Outdoor Walkway"),
+    # and a phantom portal fails topology validation for the whole building.
+    type_text = source_type.lower()
+    if "elevator" in type_text or "lift" in type_text or re.search(r"e\d+$", external_id, re.IGNORECASE):
         return "elevator"
-    if "stair" in text or re.search(r"s\d+$", external_id, re.IGNORECASE):
+    if "stair" in type_text or re.search(r"s\d+$", external_id, re.IGNORECASE):
         return "stair"
-    if "entrance" in text or "door" in text:
+    if "entrance" in type_text or "door" in type_text:
         return "door"
     return ""
 

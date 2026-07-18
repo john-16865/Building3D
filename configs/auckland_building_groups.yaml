@@ -136,7 +136,6 @@ groups:
     members:
       - "421E"
       - "421W"
-      - "422"
     aliases:
       - architecture
       - architecture building
@@ -144,7 +143,6 @@ groups:
       - "421"
       - "421E"
       - "421W"
-      - "422"
 
   - id: cll
     display_name: CLL Building
@@ -156,4 +154,144 @@ groups:
       - cll building
       - languages
       - "207"
+
+  - id: recreation
+    display_name: HIWA Recreation Centre
+    primary_member: "310"
+    members:
+      - "310"
+    aliases:
+      - hiwa
+      - recreation
+      - recreation centre
+      - rec centre
+      - rec
+      - gym
+      - "310"
+
+  - id: student_commons
+    display_name: Student Commons
+    primary_member: "311"
+    members:
+      - "311"
+    aliases:
+      - student commons
+      - commons
+      - student hub
+      - "311"
+
+  - id: conference
+    display_name: Conference Centre
+    primary_member: "423"
+    members:
+      - "423"
+    aliases:
+      - conference
+      - conference centre
+      - conference center
+      - confcen
+      - "423"
+
+  - id: music
+    display_name: Music School
+    primary_member: "250"
+    members:
+      - "250"
+    aliases:
+      - music
+      - music school
+      - school of music
+      - "250"
+
+  - id: law
+    display_name: Law School
+    primary_member: "801"
+    members:
+      - "801"
+      - "802"
+    aliases:
+      - law
+      - law school
+      - faculty of law
+      - eden crescent
+      - "801"
+      - "802"
+
+  - id: law_library
+    display_name: Davis Law Library
+    primary_member: "810"
+    members:
+      - "810"
+    aliases:
+      - law library
+      - davis law library
+      - davis
+      - short street
+      - "810"
+
+  - id: old_choral_hall
+    display_name: Old Choral Hall
+    primary_member: "104"
+    members:
+      - "104"
+    aliases:
+      - old choral hall
+      - choral hall
+      - "104"
+
+  - id: old_government_house
+    display_name: Old Government House
+    primary_member: "102"
+    members:
+      - "102"
+    aliases:
+      - old government house
+      - government house
+      - ogh
+      - "102"
+
+  - id: kenneth_myers
+    display_name: Kenneth Myers Centre
+    primary_member: "820"
+    members:
+      - "820"
+    aliases:
+      - kenneth myers
+      - kenneth myers centre
+      - kmc
+      - "820"
+
+  - id: fale_pasifika
+    display_name: Fale Pasifika
+    primary_member: "275"
+    members:
+      - "275"
+      - "273"
+    aliases:
+      - fale pasifika
+      - fale
+      - pasifika
+      - "275"
+      - "273"
+
+  - id: acoustics
+    display_name: Architecture Acoustics Laboratory
+    primary_member: "422"
+    members:
+      - "422"
+    aliases:
+      - acoustics
+      - acoustics lab
+      - acoustics laboratory
+      - "422"
+
+  - id: law_annex
+    display_name: 17 Eden Crescent
+    primary_member: "803"
+    members:
+      - "803"
+    aliases:
+      - law annex
+      - 17 eden crescent
+      - "803"
 

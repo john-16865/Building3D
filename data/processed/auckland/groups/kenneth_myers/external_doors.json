@@ -1,0 +1,41 @@
+[
+  {
+    "aliases": [
+      "kenneth_myers_entry_001",
+      "MainDoor",
+      "Main entrance",
+      "Kenneth Myers Centre Main entrance",
+      "kenneth_myers Main entrance",
+      "kenneth_myers entry 1",
+      "kenneth_myers door 1",
+      "kenneth_myers entrance"
+    ],
+    "anchor": [
+      9.359733,
+      0.0,
+      14.910969
+    ],
+    "confidence": "high",
+    "display_name": "Main entrance",
+    "entry_id": "kenneth_myers_entry_001",
+    "external_id": "kenneth_myers_entry_001",
+    "floor_index": 0,
+    "floor_name": "G",
+    "kind": "door",
+    "lat": -36.8466021,
+    "logical_building_id": "kenneth_myers",
+    "lon": 174.76946175,
+    "node_name": "MainDoor",
+    "source": "manual_street_frontage_shortland_st",
+    "source_building_admin_id": "820",
+    "source_entry_id": "kenneth_myers_entry_001",
+    "source_external_id": "kenneth_myers_entry_001",
+    "source_floor": null,
+    "source_id": "kenneth_myers_entry_001",
+    "supporting_routes": 0,
+    "target_building_admin_ids": [
+      "820"
+    ],
+    "target_external_ids": []
+  }
+]

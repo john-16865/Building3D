@@ -618,10 +618,19 @@ def build_building_route_polylines(
     }
     ids = sorted(pts)
     out: dict[str, list[list[float]]] = {}
+    failed_pairs = 0
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            route = _route(client, pts[a], pts[b])
+            try:
+                route = _route(client, pts[a], pts[b])
+            except Exception:
+                # Directions 404s for entrances the venue graph cannot reach
+                # (hand-authored doors on buildings MapsIndoors never routes
+                # into). Those buildings still join the network via their
+                # entrance spurs, which do not use the directions API.
+                failed_pairs += 1
+                continue
             if not route or str(route.get("status")) != "OK":
                 continue
             poly_lonlat = _route_polyline_lonlat(route)
@@ -630,6 +639,10 @@ def build_building_route_polylines(
             projected = [list(project_to_campus(lon, lat, ref)) for lon, lat in poly_lonlat]
             simplified = _simplify_polyline(projected, cfg.simplify_m * ref.scale)
             out[f"{a}|{b}"] = [[round(x, 3), round(z, 3)] for x, z in simplified]
+    if failed_pairs:
+        print(f"  building pair routes: {len(out)} OK, {failed_pairs} unroutable (skipped)", flush=True)
+    if not out and failed_pairs:
+        raise SystemExit("Every building pair route failed - directions API down?")
     return out
 
 

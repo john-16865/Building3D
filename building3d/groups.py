@@ -199,9 +199,15 @@ def generate_group(
         ],
     }
     manifest = refresh_generation_hash(manifest)
+    # Topology proofs must run on the meshes the baked scene actually ships:
+    # for route-covered floors these ARE the route meshes, and for fallback
+    # floors (incl. whole buildings the directions graph never routes into,
+    # e.g. acoustics/kenneth_myers/law_annex) the geometry meshes. Proving on
+    # route meshes only left those buildings with zero door->stair transfer
+    # edges, so every cross-floor route was rejected at build time.
     portal_topology = build_portal_topology(
         manifest,
-        route_navigation_meshes,
+        scene_navigation_meshes,
     )
     floor_visual_paths = {
         floor_index: f"{_unimate_asset_base(group)}/{filename}"
