@@ -437,10 +437,22 @@ def _iter_polygons(geometry: Any) -> list[Polygon]:
 
 
 def _component_index(point: Point, components: list[Polygon]) -> int | None:
+    # Mirror the runtime, which snaps query points to the CLOSEST navmesh
+    # point: a terminal is assigned to its nearest component, not required to
+    # sit inside one. External doors legitimately sit on the building edge
+    # just outside the walkable mesh (hand-authored entrances especially), and
+    # strict containment left them island terminals - every cross-floor route
+    # from that entrance was then rejected at build time.
+    best_index: int | None = None
+    best_distance = float("inf")
     for index, component in enumerate(components):
-        if component.covers(point) or component.distance(point) <= 0.05:
+        if component.covers(point):
             return index
-    return None
+        distance = component.distance(point)
+        if distance < best_distance:
+            best_distance = distance
+            best_index = index
+    return best_index
 
 
 def _floors_by_index(manifest: dict[str, Any]) -> dict[int, dict[str, Any]]:
