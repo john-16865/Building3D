@@ -27,6 +27,8 @@ MATERIAL_COLORS = {
     "campus_steps": (0.62, 0.40, 0.28, 1.0),
     "campus_spur": (0.45, 0.50, 0.45, 1.0),
     "campus_connector": (0.42, 0.44, 0.50, 1.0),
+    "campus_context": (0.78, 0.77, 0.74, 1.0),
+    "campus_context_roof": (0.68, 0.68, 0.66, 1.0),
     "default": (0.65, 0.65, 0.65, 1.0),
 }
 

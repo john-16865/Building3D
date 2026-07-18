@@ -156,6 +156,93 @@ def wire_building_main(
     return {"building_main": str(scene_path), "changed": True, "node_name": node_name, "ext_id": ext_id}
 
 
+def wire_campus_main(
+    godot_dir: str | Path,
+    group_id: str,
+    *,
+    campus_scene_rel: str = "Scene/Campus/CampusMain.tscn",
+) -> dict[str, Any]:
+    """Add the group's baked scene to CampusMain as an exterior-only prop.
+
+    Pure text insertion, mirroring ``wire_building_main``: unlike the generated
+    ``apply_*_campus_placement.gd`` scripts this never instantiates and
+    re-packs the hand-made campus scene, so an editor/CLI version mismatch
+    cannot reformat or localize the rest of CampusMain. Idempotent.
+
+    Reads ``Assets/Buildings/<Dir>/<id>_campus_placement.json`` (written by
+    ``publish_group_to_unimate``) for the transform and entrance marker.
+    """
+    godot_path = Path(godot_dir)
+    scene_path = godot_path / campus_scene_rel
+    if not scene_path.exists():
+        raise FileNotFoundError(scene_path)
+    placement_path = (
+        godot_path / "Assets" / "Buildings" / asset_dir_name(group_id) / f"{group_id}_campus_placement.json"
+    )
+    if not placement_path.exists():
+        raise FileNotFoundError(placement_path)
+    placement = json.loads(placement_path.read_text(encoding="utf-8"))
+
+    text = scene_path.read_text(encoding="utf-8")
+    node_name = str(placement.get("node_name") or asset_dir_name(group_id))
+    baked_res = str(placement.get("scene_path") or f"res://Scene/{group_id}_baked_full.tscn")
+
+    parent_match = re.search(r'\[node name="Buildings"[^\]]*parent="([^"]+)"', text)
+    if parent_match is None:
+        raise ValueError(f"{scene_path} has no Buildings node to attach to")
+    children_parent = f"{parent_match.group(1)}/Buildings"
+
+    if baked_res in text or f'[node name="{node_name}" parent="{children_parent}"' in text:
+        return {"campus_main": str(scene_path), "changed": False, "node_name": node_name}
+
+    ext_id = _unique_ext_resource_id(text, f"{group_id}_campus_building")
+    ext_line = f'[ext_resource type="PackedScene" path="{baked_res}" id="{ext_id}"]'
+    lines = text.split("\n")
+    ext_indexes = [index for index, line in enumerate(lines) if line.startswith("[ext_resource")]
+    if not ext_indexes:
+        raise ValueError(f"{scene_path} has no ext_resource block")
+    lines.insert(ext_indexes[-1] + 1, ext_line)
+    text = "\n".join(lines)
+
+    transform_literal = str(placement.get("transform", {}).get("godot") or "")
+    if not transform_literal:
+        raise ValueError(f"{placement_path} has no transform.godot literal")
+    entrance = placement.get("entrance") or {}
+    anchor = entrance.get("anchor") or [0.0, 0.0, 0.0]
+    size = entrance.get("marker_size") or [30.0, 30.0, 30.0]
+    marker_name = str(entrance.get("marker_name") or "Entrance")
+    node_block = (
+        f'[node name="{node_name}" parent="{children_parent}" instance=ExtResource("{ext_id}")]\n'
+        f"transform = {transform_literal}\n"
+        "exterior_only = true\n"
+        "\n"
+        f'[node name="{marker_name}" type="CSGBox3D" parent="{children_parent}/{node_name}"]\n'
+        f"transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, {_num(anchor[0])}, {_num(anchor[1])}, {_num(anchor[2])})\n"
+        f"size = Vector3({_num(size[0])}, {_num(size[1])}, {_num(size[2])})\n"
+        "visible = false\n"
+    )
+
+    # Insert after the last node that lives under the Buildings subtree
+    # (direct children AND their Entrance markers), so the new building block
+    # never lands between an existing building and its own children.
+    subtree_marker = f'parent="{children_parent}'
+    last_subtree = text.rfind(subtree_marker)
+    if last_subtree == -1:
+        raise ValueError(f"{scene_path} Buildings node has no existing child to anchor after")
+    next_node = text.find("[node", last_subtree)
+    if next_node == -1:
+        text = text.rstrip("\n") + "\n\n" + node_block
+    else:
+        text = text[:next_node] + node_block + "\n" + text[next_node:]
+
+    scene_path.write_text(text, encoding="utf-8", newline="\n")
+    return {"campus_main": str(scene_path), "changed": True, "node_name": node_name, "ext_id": ext_id}
+
+
+def _num(value: Any) -> str:
+    return ("%g" % float(value))
+
+
 def _unique_ext_resource_id(text: str, base: str) -> str:
     if f'id="{base}"' not in text:
         return base
@@ -596,6 +683,9 @@ func _upsert_building(scene_root: Node, buildings: Node3D, placement: Dictionary
 \t\treturn false
 \tbuilding.name = node_name
 \tbuilding.set("building_name", building_id)
+\t# Campus instances are exterior props: skip portal scans, keep nav regions
+\t# off, and never claim Navigator ownership from the BuildingMain instances.
+\tbuilding.set("exterior_only", true)
 \tbuilding.transform = _transform_from_placement(placement)
 \tbuildings.add_child(building)
 \tbuilding.owner = scene_root
@@ -752,12 +842,60 @@ def publish_campus_paths_to_unimate(
         _run_godot_script(godot_path, bake_script, godot_bin)
         _run_godot_script(godot_path, check_script, godot_bin)
     if apply_to_campus:
-        _run_godot_script(godot_path, apply_script, godot_bin)
+        # Text insertion instead of the generated apply script: see
+        # wire_campus_roads for why CampusMain is never re-packed here.
+        result["campus_wiring"] = wire_campus_roads(godot_path, cfg)
     if run_probe:
         _run_godot_script(godot_path, probe_script, godot_bin)
         # Gate on the drawn campus line following the true MapsIndoors route.
         _run_godot_script(godot_path, line_probe_script, godot_bin)
     return result
+
+
+def wire_campus_roads(
+    godot_dir: str | Path,
+    cfg,
+) -> dict[str, Any]:
+    """Text-wire the baked campus roads scene into CampusMain.
+
+    Same rationale as wire_campus_main: the generated apply script re-packs
+    the whole hand-made campus scene, which reformats it when the local Godot
+    build differs from the editor's. This inserts one instance node with the
+    Buildings node's transform instead. Idempotent.
+    """
+    godot_path = Path(godot_dir)
+    scene_path = godot_path / cfg.campus_scene.removeprefix("res://")
+    text = scene_path.read_text(encoding="utf-8")
+    roads_res = "res://Scene/campus_roads_baked.tscn"
+    if roads_res in text or f'[node name="{cfg.roads_node_name}"' in text:
+        return {"campus_main": str(scene_path), "changed": False}
+
+    buildings_match = re.search(
+        r'\[node name="Buildings"[^\]]*parent="([^"]+)"[^\]]*\]\n(transform = [^\n]+)?',
+        text,
+    )
+    if buildings_match is None:
+        raise ValueError(f"{scene_path} has no Buildings node")
+    subviewport_parent = buildings_match.group(1)
+    # Road vertices are authored in Buildings-parent placement space, so the
+    # roads root carries the exact same transform as the Buildings node.
+    transform_line = buildings_match.group(2) or "transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+
+    ext_id = _unique_ext_resource_id(text, "campus_roads_scene")
+    ext_line = f'[ext_resource type="PackedScene" path="{roads_res}" id="{ext_id}"]'
+    lines = text.split("\n")
+    ext_indexes = [index for index, line in enumerate(lines) if line.startswith("[ext_resource")]
+    lines.insert(ext_indexes[-1] + 1, ext_line)
+    text = "\n".join(lines)
+
+    node_block = (
+        f'[node name="{cfg.roads_node_name}" parent="{subviewport_parent}" instance=ExtResource("{ext_id}")]\n'
+        f"{transform_line}\n"
+    )
+    buildings_header = text.find('[node name="Buildings"')
+    text = text[:buildings_header] + node_block + "\n" + text[buildings_header:]
+    scene_path.write_text(text, encoding="utf-8", newline="\n")
+    return {"campus_main": str(scene_path), "changed": True, "ext_id": ext_id}
 
 
 def _campus_roads_source_scene(roads_node: str) -> str:

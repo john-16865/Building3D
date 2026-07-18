@@ -25,7 +25,7 @@ from building3d.batch import discover_inventory
 from building3d.config import BuildingGroupConfig, SolutionConfig
 from building3d.groups import generate_group
 from building3d.room_door_derivation import derive_group_door_points
-from building3d.unimate_publish import publish_group_to_unimate, wire_building_main
+from building3d.unimate_publish import publish_group_to_unimate, wire_building_main, wire_campus_main
 from building3d.vertical_links import DEFAULT_GRAPH_ID
 
 
@@ -89,16 +89,33 @@ def build_unimate_building(
         godot_dir,
         run_bake=run_bake,
         apply_campus_placement=apply_campus_placement,
-        run_campus_apply=apply_campus_placement,
+        # CampusMain is wired by text insertion below (wire_campus_main); the
+        # generated apply script re-packs the whole hand-made scene and can
+        # reformat it when the local Godot build differs from the editor's.
+        run_campus_apply=False,
         campus_placement_config=campus_placement_config if apply_campus_placement else None,
         godot_bin=godot_bin,
     )
     steps.append({"step": "publish", "source_scene": str(publish.get("source_scene")), "asset_dir": str(publish.get("asset_dir"))})
 
+    if apply_campus_placement:
+        campus_wiring = wire_campus_main(godot_dir, group.id)
+        steps.append({"step": "wire_campus_main", **{k: str(v) for k, v in campus_wiring.items()}})
+
     wiring: dict[str, Any] = {}
     if wire_main:
-        wiring = wire_building_main(godot_dir, group.id)
-        steps.append({"step": "wire_building_main", **{k: str(v) for k, v in wiring.items()}})
+        # BuildingMain no longer hard-wires published buildings: UNIMATE's
+        # BuildingRegistry lazy-loads them from building_registry.json, so
+        # "wiring" now means regenerating that registry (and the per-building
+        # rooms indexes) from the published manifests + baked scenes.
+        registry_script = Path(godot_dir) / "tools" / "generate_building_registry.gd"
+        if registry_script.exists() and run_bake:
+            _run_registry_generator(Path(godot_dir), godot_bin)
+            wiring = {"registry": str(Path(godot_dir) / "Assets" / "Buildings" / "building_registry.json")}
+            steps.append({"step": "generate_building_registry", **wiring})
+        else:
+            wiring = wire_building_main(godot_dir, group.id)
+            steps.append({"step": "wire_building_main", **{k: str(v) for k, v in wiring.items()}})
 
     backend: dict[str, Any] = {}
     if sync_backend:
@@ -136,6 +153,20 @@ def build_unimate_building(
         "campus_paths": campus_paths,
         "steps": steps,
     }
+
+
+def _run_registry_generator(godot_dir: Path, godot_bin: str) -> None:
+    subprocess.run(
+        [
+            godot_bin,
+            "--headless",
+            "--path",
+            str(godot_dir),
+            "--script",
+            "res://tools/generate_building_registry.gd",
+        ],
+        check=True,
+    )
 
 
 def _sync_backend_rooms(backend_dir: str | Path | None) -> dict[str, Any]:
