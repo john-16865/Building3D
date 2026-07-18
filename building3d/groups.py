@@ -157,7 +157,11 @@ def generate_group(
         export_dir,
         group.id,
     )
-    scene_navigation_meshes = route_navigation_meshes if route_navigation_meshes else meshes
+    scene_navigation_meshes = _scene_navigation_meshes_with_floor_fallback(
+        route_navigation_meshes,
+        meshes,
+        manifest.get("floors", []),
+    )
     if route_nav_stats:
         route_nav_stats["route_wall_openings"] = _route_wall_opening_stats(route_wall_openings)
         manifest.setdefault("nav", {})["validation"] = route_nav_stats
@@ -573,10 +577,16 @@ def _complete_route_navigation_meshes(
     if not route_meshes:
         return [], route_stats
 
+    # Floors without route coverage (e.g. a two-room mezzanine MapsIndoors
+    # never routes through) no longer discard the WHOLE building's route
+    # navmesh - that stripped every walkable path and topology transfer edge
+    # from Elam/art. The caller falls back to geometry meshes per missing
+    # floor instead; the gap is recorded for QA.
     required_floor_names = _required_navigation_floor_names(manifest)
     route_floor_names = {_floor_name_from_route_nav_mesh(mesh.name) for mesh in route_meshes}
-    if required_floor_names and not required_floor_names.issubset(route_floor_names):
-        return [], route_stats
+    missing_floor_names = sorted(required_floor_names - route_floor_names)
+    if missing_floor_names:
+        route_stats["floors_missing_route_coverage"] = missing_floor_names
     return route_meshes, route_stats
 
 
@@ -2086,6 +2096,29 @@ def _anchor_distance(start: Any, end: Any) -> float:
     if not _valid_local_anchor(start) or not _valid_local_anchor(end):
         return 0.0
     return _distance_2d(float(start[0]), float(start[2]), float(end[0]), float(end[2]))
+
+
+def _scene_navigation_meshes_with_floor_fallback(
+    route_meshes: list[MeshData],
+    geometry_meshes: list[MeshData],
+    floors: list[dict[str, Any]],
+) -> list[MeshData]:
+    """Route-derived navmesh per floor, geometry navmesh for uncovered floors.
+
+    The scene navmesh must exist for EVERY floor that has rooms, but route
+    coverage can legitimately miss small mezzanines. Only the topology's
+    same-floor transfer proof stays route-only (a whole-slab fallback would
+    fabricate walkable bridges between physically separate wings).
+    """
+    if not route_meshes:
+        return geometry_meshes
+    covered_floor_names = {_floor_name_from_route_nav_mesh(mesh.name) for mesh in route_meshes}
+    fallback = [
+        mesh
+        for mesh in geometry_meshes
+        if _canonical_floor_name(mesh_floor_name(mesh.name)) not in covered_floor_names
+    ]
+    return route_meshes + fallback
 
 
 def _required_navigation_floor_names(manifest: dict[str, Any]) -> set[str]:

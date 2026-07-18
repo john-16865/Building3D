@@ -22,7 +22,7 @@ def portal_node_name(external_id: str, display_name: str, kind: str, group_id: s
     prefix = _external_id_to_room_prefix(external_id)
     kind_label = "Elevator" if kind == "elevator" else "Stairs" if kind == "stair" else _clean_node_text(display_name) or "Door"
     if kind in {"stair", "elevator"}:
-        set_id = _portal_set_id(kind, group_id)
+        set_id = portal_set_id(kind, group_id, external_id)
         return f"{prefix}_{kind_label}_Set{set_id}"
     return f"{prefix}_{kind_label}" if prefix else kind_label
 
@@ -236,8 +236,22 @@ def _external_id_to_room_prefix(external_id: str) -> str:
     return _clean_node_text(str(external_id).replace("-", " "))
 
 
-def _portal_set_id(kind: str, group_id: str) -> str:
+def portal_set_id(kind: str, group_id: str, external_id: str = "") -> str:
+    """Unique set id per PHYSICAL shaft.
+
+    UNIMATE groups vertical connectors across floors by the node name's
+    ``_Set<X>`` suffix alone. In a merged building group every member wing has
+    its own "S1"/"E1" from MapsIndoors, so a bare group id would fuse stairs
+    from different wings into one impossible shaft (the router then "exits"
+    a stair tens of metres from where it entered). Prefixing the member
+    admin id ("431" + "S1" -> Set431S1) keeps each wing's shaft distinct.
+    """
     clean = _clean_node_text(group_id).upper()
+    member = ""
+    if "-" in str(external_id):
+        member = _clean_node_text(str(external_id).split("-", 1)[0]).upper()
+    if member:
+        return f"{member}{clean or 'MAIN'}"
     if kind == "stair" and clean.startswith("S") and len(clean) > 1:
         return clean[1:]
     return clean or "MAIN"

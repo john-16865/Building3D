@@ -60,8 +60,8 @@ def test_route_derived_vertical_links_accept_direct_mapsindoors_transition():
     assert route_links[0]["confidence"] == "high"
     assert manifest["portals"][0]["group_id"] == "MI_303_ELEV_001"
     assert manifest["portals"][1]["group_id"] == "MI_303_ELEV_001"
-    assert manifest["portals"][0]["node_name"] == "303 802_Elevator_SetMI_303_ELEV_001"
-    assert manifest["portals"][1]["node_name"] == "303 8U02_Elevator_SetMI_303_ELEV_001"
+    assert manifest["portals"][0]["node_name"] == "303 802_Elevator_Set303MI_303_ELEV_001"
+    assert manifest["portals"][1]["node_name"] == "303 8U02_Elevator_Set303MI_303_ELEV_001"
     assert dataset.portals[0].group_id == "MI_303_ELEV_001"
     assert dataset.portals[1].group_id == "MI_303_ELEV_001"
 

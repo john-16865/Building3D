@@ -12,6 +12,7 @@ from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
 from building3d.geometry import MeshData, mesh_floor_name
+from building3d.unimate import portal_set_id
 
 
 PORTAL_TOPOLOGY_SCHEMA_VERSION = 1
@@ -86,9 +87,11 @@ def _topology_terminals(
         anchor = record.get("anchor")
         if not _valid_anchor(anchor):
             continue
-        group_id = _topology_group_id(record)
-        if _record_is_ungrouped_vertical(record, group_id):
+        # Ungrouped verticals are judged on the RAW group id: the member-scoped
+        # set id below prefixes the admin id, which would mask "" / "DEFAULT".
+        if _record_is_ungrouped_vertical(record, str(record.get("group_id") or "")):
             continue
+        group_id = _topology_group_id(record)
         floor_index = int(record.get("floor_index", 0))
         floor = floors_by_index.get(floor_index, {})
         floor_name = str(record.get("floor_name") or floor.get("floor_name", ""))
@@ -287,7 +290,7 @@ def _vertical_edges(
         if not start or not end:
             continue
         mode = _edge_mode(kind)
-        group_id = _edge_group_id(kind, raw_group_id)
+        group_id = _edge_group_id(kind, raw_group_id, str(link.get("from_external_id") or ""))
         cost = _vertical_cost(start, end)
         edge = {
             "from": str(start["id"]),
@@ -502,20 +505,22 @@ def _record_is_ungrouped_vertical(record: dict[str, Any], group_id: str) -> bool
 
 
 def _topology_group_id(record: dict[str, Any]) -> str:
+    """Terminal group id, identical to the node name's _Set suffix.
+
+    BuildingController derives PortalRef.group_id from the _Set suffix and the
+    topology matcher compares group ids exactly, so vertical connectors must
+    use the same member-scoped set id (building3d.unimate.portal_set_id).
+    Doors have no _Set suffix, so their raw (usually empty) group id stays.
+    """
+    kind = str(record.get("kind") or "").lower()
     group_id = str(record.get("group_id") or "")
-    if str(record.get("kind") or "").lower() == "stair":
-        clean = group_id.strip().upper()
-        if clean.startswith("S") and len(clean) > 1:
-            return clean[1:]
-    return group_id
+    if kind not in VERTICAL_MODES:
+        return group_id
+    return portal_set_id(kind, group_id, str(record.get("external_id") or ""))
 
 
-def _edge_group_id(kind: str, group_id: str) -> str:
-    if kind == "stair":
-        clean = str(group_id).strip().upper()
-        if clean.startswith("S") and len(clean) > 1:
-            return clean[1:]
-    return str(group_id)
+def _edge_group_id(kind: str, group_id: str, external_id: str = "") -> str:
+    return portal_set_id(kind, group_id, external_id)
 
 
 def _edge_mode(kind: str) -> str:
