@@ -1598,7 +1598,21 @@ def _normalise_external_door(
     floor_name = _canonical_floor_name(str(item.get("floor_name") or "G"))
     floor_index = floor_index_by_name.get(floor_name.upper())
     if floor_index is None:
-        return None
+        # Route-derived entries are stamped with the campus graph's street
+        # level ("G"), but not every building names a floor that: Humanities'
+        # stack is "1".."9". External entries are street-level by
+        # construction, so resolve to the building's lowest non-basement
+        # floor instead of dropping the door - dropping every entry left the
+        # building without any placement entrance and aborted publishing.
+        ground_candidates = {
+            name: index
+            for name, index in floor_index_by_name.items()
+            if not name.startswith("B")
+        } or floor_index_by_name
+        if not ground_candidates:
+            return None
+        fallback_name, floor_index = min(ground_candidates.items(), key=lambda kv: kv[1])
+        floor_name = _canonical_floor_name(fallback_name)
     node_name = str(item.get("node_name") or _external_door_node_name(index))
     display_name = str(item.get("display_name") or ("Main entrance" if index == 1 else f"Entry {index}"))
     aliases = _external_door_aliases(group, entry_id, node_name, display_name, index)

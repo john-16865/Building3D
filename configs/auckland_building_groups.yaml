@@ -65,3 +65,95 @@ groups:
       - "432"
       - "433"
 
+  - id: library
+    display_name: General Library
+    primary_member: "109"
+    members:
+      - "109"
+    aliases:
+      - library
+      - general library
+      - gen lib
+      - "109"
+
+  - id: arts_education
+    display_name: Arts and Education
+    primary_member: "201"
+    members:
+      - "201"
+    aliases:
+      - arts and education
+      - arts education
+      - arts & education
+      - education
+      - "201"
+
+  - id: humanities
+    display_name: Humanities Building
+    primary_member: "206"
+    members:
+      - "206"
+    aliases:
+      - humanities
+      - humanities building
+      - "206"
+
+  - id: thomas
+    display_name: Thomas Building and Biology
+    primary_member: "110"
+    members:
+      - "110"
+      - "110N"
+      - "106"
+    aliases:
+      - thomas
+      - thomas building
+      - biology
+      - biosci
+      - biological sciences
+      - "110"
+      - "110N"
+      - "106"
+
+  - id: clocktower
+    display_name: The Clock Tower
+    primary_member: "105"
+    members:
+      - "105"
+      - "105S"
+      - "119"
+    aliases:
+      - clocktower
+      - clock tower
+      - the clock tower
+      - "105"
+      - "105S"
+      - "119"
+
+  - id: architecture
+    display_name: Architecture
+    primary_member: "421E"
+    members:
+      - "421E"
+      - "421W"
+      - "422"
+    aliases:
+      - architecture
+      - architecture building
+      - archi
+      - "421"
+      - "421E"
+      - "421W"
+      - "422"
+
+  - id: cll
+    display_name: CLL Building
+    primary_member: "207"
+    members:
+      - "207"
+    aliases:
+      - cll
+      - cll building
+      - languages
+      - "207"
+
