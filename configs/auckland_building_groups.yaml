@@ -155,6 +155,18 @@ groups:
       - languages
       - "207"
 
+  - id: business
+    display_name: Business School OGGB
+    primary_member: "260"
+    members:
+      - "260"
+    aliases:
+      - business
+      - business school
+      - oggb
+      - owen g glenn
+      - "260"
+
   - id: recreation
     display_name: HIWA Recreation Centre
     primary_member: "310"
