@@ -434,8 +434,16 @@ def _floor_sort_key(value: str) -> tuple[float, str]:
             return (-1.0, clean)
     if clean == "G":
         return (0.0, clean)
+    if clean == "SB":
+        # Sub-basement (architecture): between B-1 and B-2. Unrecognized
+        # labels used to fall through to the 10_000 sentinel, which became a
+        # 42000-unit floor height and a kilometre-tall campus prop.
+        return (-1.5, clean)
     if clean.startswith("M") and clean[1:].isdigit():
         return (float(clean[1:]) + 0.5, clean)
+    if clean.endswith("M") and clean[:-1].isdigit():
+        # Digit-first mezzanine style ("1M" = mezzanine above level 1).
+        return (float(clean[:-1]) + 0.5, clean)
     try:
         return (float(clean), clean)
     except ValueError:
@@ -447,10 +455,11 @@ def _floor_heights(floors: list[FloorRecord], default_spacing: float, basement_s
     for floor in floors:
         label = floor.floor_name
         sort_value = _floor_sort_key(label)[0]
-        if label.startswith("B-"):
-            heights[label] = round(sort_value * basement_spacing, 6)
-        elif label == "G":
+        if label == "G":
             heights[label] = 0.0
+        elif sort_value < 0.0:
+            # Below-ground levels (B-*, SB) use the tighter basement spacing.
+            heights[label] = round(sort_value * basement_spacing, 6)
         else:
             heights[label] = round(sort_value * default_spacing, 6)
     return heights

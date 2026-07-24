@@ -2122,3 +2122,27 @@ def _write_room_door_points(processed_group_dir):
         }
     ]
     (processed_group_dir / "science_room_door_points_route_derived.json").write_text(json.dumps(rows), encoding="utf-8")
+
+
+def test_floor_sort_key_orders_mezzanine_and_subbasement_labels():
+    # "1M" (digit-first mezzanine) and "SB" (sub-basement) used to fall
+    # through to the 10_000 sentinel, which _floor_heights turned into a
+    # 42000-unit floor height (a kilometre-tall campus prop).
+    assert groups._floor_sort_key("1M")[0] == 1.5
+    assert groups._floor_sort_key("M8")[0] == 8.5
+    assert groups._floor_sort_key("SB")[0] == -1.5
+    assert groups._floor_sort_key("B-2")[0] == -2.0
+    assert groups._floor_sort_key("G")[0] == 0.0
+    assert groups._floor_sort_key("???")[0] == 10_000.0
+
+
+def test_floor_heights_place_mezzanine_between_floors_and_sb_below_b1():
+    floors = [
+        FloorRecord(floor_name="B-1", floor_index=0),
+        FloorRecord(floor_name="SB", floor_index=1),
+        FloorRecord(floor_name="1", floor_index=2),
+        FloorRecord(floor_name="1M", floor_index=3),
+        FloorRecord(floor_name="2", floor_index=4),
+    ]
+    heights = groups._floor_heights(floors, default_spacing=4.2, basement_spacing=3.0)
+    assert heights == {"B-1": -3.0, "SB": -4.5, "1": 4.2, "1M": 6.3, "2": 8.4}
