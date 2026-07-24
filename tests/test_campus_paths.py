@@ -172,6 +172,18 @@ def test_extract_bridges_indoor_gap_within_a_leg():
     assert conn == ((0.001, 0.0), (0.002, 0.0))  # spans exactly the indoor step
 
 
+def test_extract_drops_trailing_indoor_stretch_without_connector():
+    # A route that ENDS inside the destination building must not leave a
+    # dangling connector into it: the entrance spur owns the road->door link.
+    route = _multistep_route([
+        ("OutsideOnVenue", "footway", [(0.0, 0.0), (0.001, 0.0)]),
+        ("InsideBuilding", "footway", [(0.001, 0.0), (0.002, 0.0)]),
+    ])
+    segments, highways = extract_outdoor_segments([route])
+    assert highways.count("connector") == 0
+    assert highways.count("footway") == 1
+
+
 def test_placement_to_lonlat_inverts_projection():
     cfg = CampusPathsConfig()
     ref = cfg.reference

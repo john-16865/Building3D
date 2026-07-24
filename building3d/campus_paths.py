@@ -239,12 +239,12 @@ def extract_outdoor_segments(routes: list[dict[str, Any]]) -> tuple[list, list]:
                     if not pts:
                         continue
                     if "Inside" in str(step.get("abutters") or ""):
-                        # Bridge the indoor stretch with one connector, keeping the
-                        # route connected without meshing a road through the building.
-                        if prev is not None and prev != pts[-1]:
-                            segments.append((prev, pts[-1]))
-                            highways.append("connector")
-                        prev = pts[-1]
+                        # Skip the indoor stretch but leave `prev` at the last
+                        # OUTDOOR point: when the next outdoor step arrives the
+                        # gap-stitch below bridges the whole indoor passage with
+                        # ONE connector. Routes that START or END indoors get no
+                        # dangling connector into the building — the entrance
+                        # spur owns the road->door link.
                         continue
                     hwy = str(step.get("highway") or "path")
                     if prev is not None and prev != pts[0]:
@@ -612,10 +612,14 @@ def build_building_route_polylines(
     project back onto the same door points the spurs use.
     """
     ref = cfg.reference
-    pts = {
-        str(e["building_id"]).lower(): placement_to_lonlat(float(e["x"]), float(e["z"]), ref)
-        for e in entrances
-    }
+    # First door per building wins: load_building_entrances lists the primary
+    # placement entrance first, and that is the door campus routing ends at.
+    pts: dict[str, tuple[float, float]] = {}
+    for e in entrances:
+        pts.setdefault(
+            str(e["building_id"]).lower(),
+            placement_to_lonlat(float(e["x"]), float(e["z"]), ref),
+        )
     ids = sorted(pts)
     out: dict[str, list[list[float]]] = {}
     failed_pairs = 0
@@ -668,10 +672,21 @@ def generate_campus_paths(
     bbox = details.get("bbox")
     targets = _building_targets(inventory_path, bbox, cfg.max_targets)
     entrances = load_building_entrances(godot_dir, cfg)
-    building_points = [placement_to_lonlat(float(e["x"]), float(e["z"]), cfg.reference) for e in entrances]
+    # ONE representative point per building (its primary placement entrance)
+    # for the all-pairs sampling. load_building_entrances returns EVERY door
+    # (they all need spurs); doing all-pairs over every door exploded
+    # C(24,2)=276 direct-corridor samples into C(~170,2)≈14k API routes, and
+    # the flood of duplicated street coverage repainted the whole footpath
+    # network at the widest ("residential") merge priority.
+    primary_entrance_by_building: dict[str, tuple[float, float]] = {}
+    for e in entrances:
+        primary_entrance_by_building.setdefault(str(e["building_id"]), (float(e["x"]), float(e["z"])))
+    building_points = [
+        placement_to_lonlat(x, z, cfg.reference) for x, z in primary_entrance_by_building.values()
+    ]
     print(
         f"entry points: {len(entry_points)}  building targets: {len(targets)}  "
-        f"in-game buildings: {len(building_points)}",
+        f"in-game buildings: {len(building_points)} (of {len(entrances)} doors)",
         flush=True,
     )
 

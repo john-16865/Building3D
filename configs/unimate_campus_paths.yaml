@@ -38,9 +38,11 @@ widths_m:
   connector: 3.0
 
 # Max entrance->nearest-road spur length (metres) before an entrance is left
-# unconnected (reported in stats). Set to reach the most set-back building
-# (OGGB/Business sits ~67 m off the sampled network).
-entrance_spur_max_m: 80.0
+# unconnected (reported in stats). Set to reach the most set-back building:
+# acoustics' hand-authored street door sits ~84 m from the sampled pedestrian
+# network now that indoor route tails no longer mesh fake stubs near doors
+# (OGGB/Business previously drove this at ~67 m).
+entrance_spur_max_m: 100.0
 
 # Legacy buildings placed in CampusMain before the publish pipeline existed have
 # no *_campus_placement.json to glob; list their entrance points here so they
