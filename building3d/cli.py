@@ -48,7 +48,154 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Generate only this floor label after canonicalization, for example G or 2. Repeat or comma-separate for multiple floors.",
     )
+    debug_parser = subparsers.add_parser("debug-stages")
+    debug_parser.add_argument("group_id")
+    debug_parser.add_argument("--config", default="configs/auckland.yaml")
+    debug_parser.add_argument("--groups-config", default="configs/auckland_building_groups.yaml")
+    debug_parser.add_argument("--no-fetch", action="store_true", help="Fail if cached raw member data is missing")
+    debug_parser.add_argument("--output-dir", help="Directory for stage GLBs. Defaults to the group export debug folder.")
+    debug_parser.add_argument(
+        "--only-member",
+        action="append",
+        default=[],
+        help="Export debug stages for only this group member admin id. Repeat or comma-separate for multiple members.",
+    )
+    debug_parser.add_argument(
+        "--only-floor",
+        action="append",
+        default=[],
+        help="Export debug stages for only this floor label after canonicalization. Repeat or comma-separate for multiple floors.",
+    )
+    unimate_parser = subparsers.add_parser(
+        "unimate",
+        help="Generate a group and publish it into a UNIMATE Godot project end to end.",
+    )
+    unimate_parser.add_argument("group_id")
+    unimate_parser.add_argument("--config", default="configs/auckland.yaml")
+    unimate_parser.add_argument("--groups-config", default="configs/auckland_building_groups.yaml")
+    unimate_parser.add_argument("--godot-dir", required=True, help="UNIMATE Godot project directory.")
+    unimate_parser.add_argument("--godot-bin", default="godot", help="Godot 4.6+ executable for bake/apply scripts.")
+    unimate_parser.add_argument("--graph-id", default="CITY_CAMPUS_Graph")
+    unimate_parser.add_argument("--no-derive-doors", action="store_true", help="Skip route-derived door points (rooms stay sealed).")
+    unimate_parser.add_argument("--force-derive", action="store_true", help="Re-derive door points even if cached.")
+    unimate_parser.add_argument("--no-bake", action="store_true", help="Write the bake script but do not run Godot.")
+    unimate_parser.add_argument("--no-wire-building-main", action="store_true", help="Do not add the baked scene to BuildingMain.tscn.")
+    unimate_parser.add_argument("--no-campus-placement", action="store_true", help="Do not place the building on CampusMain.")
+    unimate_parser.add_argument("--campus-placement-config", default="configs/unimate_campus_placement.yaml")
+    unimate_parser.add_argument("--sync-backend", action="store_true", help="Run the backend sync_mapsindoors command.")
+    unimate_parser.add_argument("--backend-dir", default=None, help="UNIMATE backend directory containing manage.py.")
+    unimate_parser.add_argument("--no-fetch", action="store_true", help="Fail if cached raw member data is missing.")
+    unimate_parser.add_argument(
+        "--no-campus-paths",
+        action="store_true",
+        help="Skip refreshing the campus road network (the new building will have no road spur until campus-paths runs).",
+    )
+    unimate_parser.add_argument("--campus-paths-config", default="configs/unimate_campus_paths.yaml")
+    campus_paths_parser = subparsers.add_parser(
+        "campus-paths",
+        help="Generate CampusMain roads/paths from MapsIndoors and publish into Godot.",
+    )
+    campus_paths_parser.add_argument("--config", default="configs/auckland.yaml")
+    campus_paths_parser.add_argument("--paths-config", default="configs/unimate_campus_paths.yaml")
+    campus_paths_parser.add_argument("--godot-dir", default=None, help="UNIMATE Godot project directory (required to publish).")
+    campus_paths_parser.add_argument("--godot-bin", default="godot", help="Godot 4.6+ executable for bake/apply scripts.")
+    campus_paths_parser.add_argument("--no-publish", action="store_true", help="Generate artifacts only; do not copy into Godot.")
+    campus_paths_parser.add_argument("--no-bake", action="store_true", help="Publish files but do not bake the nav mesh.")
+    campus_paths_parser.add_argument("--no-apply", action="store_true", help="Do not upsert the roads into CampusMain.")
+    campus_paths_parser.add_argument("--no-probe", action="store_true", help="Skip the headless campus nav pathfinding probe.")
+    campus_paths_parser.add_argument("--force-sample", action="store_true", help="Ignore the route cache and re-sample.")
+    campus_paths_parser.add_argument("--max-targets", type=int, default=None, help="Cap building routing targets.")
+    campus_context_parser = subparsers.add_parser(
+        "campus-context",
+        help="Generate the all-campus building context GLB and publish it into CampusMain.",
+    )
+    campus_context_parser.add_argument("--config", default="configs/auckland.yaml")
+    campus_context_parser.add_argument("--paths-config", default="configs/unimate_campus_paths.yaml")
+    campus_context_parser.add_argument("--groups-config", default="configs/auckland_building_groups.yaml")
+    campus_context_parser.add_argument("--godot-dir", default=None, help="UNIMATE Godot project directory (required to publish).")
+    campus_context_parser.add_argument("--no-publish", action="store_true", help="Generate artifacts only; do not copy into Godot.")
     args = parser.parse_args(argv)
+    if args.command == "campus-context":
+        from building3d.campus_context import generate_campus_context, publish_campus_context_to_unimate
+        from building3d.campus_paths import load_campus_paths_config
+
+        solution_config = load_solution_config(args.config)
+        cfg = load_campus_paths_config(args.paths_config)
+        groups = load_group_config(args.groups_config)
+        stats = generate_campus_context(solution_config, cfg, groups)
+        print(
+            f"Campus context: {stats['buildings']} buildings, {stats['meshes']} meshes "
+            f"({stats['skipped_placed']} placed buildings skipped, {stats['skipped_geometry']} without geometry)"
+        )
+        if not args.no_publish:
+            if args.godot_dir is None:
+                print("  (no --godot-dir given; artifacts written to export dir only)")
+            else:
+                publish = publish_campus_context_to_unimate(stats["export_dir"], args.godot_dir)
+                print(f"  published -> {publish['campus_main']} (changed={publish['changed']})")
+        return 0
+    if args.command == "campus-paths":
+        from building3d.campus_paths import generate_campus_paths, load_campus_paths_config
+        from building3d.unimate_publish import publish_campus_paths_to_unimate
+
+        solution_config = load_solution_config(args.config)
+        cfg = load_campus_paths_config(args.paths_config)
+        if args.max_targets is not None:
+            from dataclasses import replace as _replace
+
+            cfg = _replace(cfg, max_targets=args.max_targets)
+        godot_dir = Path(args.godot_dir) if args.godot_dir else None
+        stats = generate_campus_paths(solution_config, cfg, godot_dir=godot_dir, force_sample=args.force_sample)
+        print(
+            f"Campus paths: {stats['edges']} edges, {stats['nodes']} nodes, "
+            f"~{stats['total_length_m']:.0f} m ({stats['routes_ok']}/{stats['routes_total']} routes)"
+        )
+        for spur in stats.get("entrance_spurs", []):
+            flag = "ok" if spur.get("connected") else "UNCONNECTED"
+            print(f"  - spur {spur.get('building_id')}: {spur.get('snap_m')} m [{flag}]")
+        if not args.no_publish:
+            if godot_dir is None:
+                print("  (no --godot-dir given; artifacts written to export dir only)")
+            else:
+                publish = publish_campus_paths_to_unimate(
+                    Path(stats["export_dir"]),
+                    godot_dir,
+                    cfg,
+                    run_bake=not args.no_bake,
+                    apply_to_campus=not args.no_apply,
+                    run_probe=not args.no_probe,
+                    godot_bin=args.godot_bin,
+                )
+                print(f"  published -> {publish['asset_dir']}")
+                print(f"  baked scene -> {publish['baked_scene']}")
+        return 0
+    if args.command == "unimate":
+        from building3d.unimate_pipeline import build_unimate_building
+
+        solution_config = load_solution_config(args.config)
+        group_config = load_group_config(args.groups_config).get(args.group_id)
+        result = build_unimate_building(
+            solution_config,
+            group_config,
+            args.godot_dir,
+            godot_bin=args.godot_bin,
+            graph_id=args.graph_id,
+            derive_doors=not args.no_derive_doors,
+            force_derive=args.force_derive,
+            run_bake=not args.no_bake,
+            wire_main=not args.no_wire_building_main,
+            apply_campus_placement=not args.no_campus_placement,
+            campus_placement_config=args.campus_placement_config if not args.no_campus_placement else None,
+            sync_backend=args.sync_backend,
+            backend_dir=args.backend_dir,
+            fetch_missing=not args.no_fetch,
+            refresh_campus_paths=not args.no_campus_paths and not args.no_campus_placement,
+            campus_paths_config=args.campus_paths_config,
+        )
+        print(f"Published UNIMATE building '{result['group_id']}' from {result['export_dir']}")
+        for step in result["steps"]:
+            print(f"  - {step.get('step')}: {json.dumps({k: v for k, v in step.items() if k != 'step'}, default=str)}")
+        return 0
     if args.command == "group":
         solution_config = load_solution_config(args.config)
         group_config = load_group_config(args.groups_config).get(args.group_id)
@@ -68,6 +215,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{label}: {path}")
         for warning in result.get("warnings", [])[:20]:
             print(f"warning: {warning}")
+        return 0
+    if args.command == "debug-stages":
+        # debug_stages.py is not tracked in the repo; import lazily so the
+        # missing module only affects this command, not the whole CLI.
+        from building3d.debug_stages import export_group_debug_stages
+
+        solution_config = load_solution_config(args.config)
+        group_config = load_group_config(args.groups_config).get(args.group_id)
+        result = export_group_debug_stages(
+            solution_config,
+            group_config,
+            fetch_missing=not args.no_fetch,
+            only_members=_split_values(args.only_member),
+            only_floors=_split_values(args.only_floor),
+            output_dir=Path(args.output_dir).resolve() if args.output_dir else None,
+        )
+        print(f"Wrote {result['debug_dir']}")
+        print(
+            f"Rooms: {result['rooms']}, floors: {result['floors']}, "
+            f"door points: {result['door_points']}, route line meshes: {result['route_line_meshes']}"
+        )
+        print(f"Door wall openings: {result['door_wall_openings']['total_edges']}")
+        print(f"Route wall openings: {result['route_wall_openings']['total_edges']}")
+        for label, path in result["artifacts"].items():
+            print(f"{label}: {path}")
         return 0
     if args.command in batch_commands:
         solution_config = load_solution_config(args.config)

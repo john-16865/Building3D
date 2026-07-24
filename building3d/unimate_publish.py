@@ -41,6 +41,9 @@ def publish_group_to_unimate(
     bake_script.write_text(_bake_script(group_id, floor_labels), encoding="utf-8", newline="\n")
     check_script.write_text(_check_script(group_id, manifest, floor_labels), encoding="utf-8", newline="\n")
     if run_bake:
+        # Newly copied GLBs need Godot to generate their .import files before a
+        # SceneTree script can load() them; a headless import pass does that.
+        _run_godot_import(godot_path, godot_bin)
         _run_godot_script(godot_path, bake_script, godot_bin)
     result: dict[str, Any] = {
         "asset_dir": asset_dir,
@@ -89,6 +92,165 @@ def asset_dir_name(group_id: str) -> str:
 
 def root_node_name(group_id: str) -> str:
     return f"{asset_dir_name(group_id)}BakedFull"
+
+
+def wire_building_main(
+    godot_dir: str | Path,
+    group_id: str,
+    *,
+    scale: float = 2.85,
+    building_main_rel: str = "Scene/BuildingMain.tscn",
+) -> dict[str, Any]:
+    """Add the group's baked scene as a child of BuildingMain's ``Buildings`` node.
+
+    Idempotent: if BuildingMain already references ``{group_id}_baked_full.tscn``
+    or already has a ``building_name = "{group_id}"`` node, nothing changes. The
+    inserted node mirrors the existing baked buildings (Science/Business): a
+    scaled instance under the same ``Buildings`` parent.
+    """
+    scene_path = Path(godot_dir) / building_main_rel
+    if not scene_path.exists():
+        raise FileNotFoundError(scene_path)
+    text = scene_path.read_text(encoding="utf-8")
+
+    node_name = asset_dir_name(group_id)
+    building_name = str(group_id)
+    baked_res = f"res://Scene/{group_id}_baked_full.tscn"
+    if baked_res in text or f'building_name = "{building_name}"' in text:
+        return {"building_main": str(scene_path), "changed": False, "node_name": node_name}
+
+    parent_match = re.search(r'\[node name="Buildings"[^\]]*parent="([^"]+)"', text)
+    if parent_match is None:
+        raise ValueError(f"{scene_path} has no Buildings node to attach to")
+    children_parent = f"{parent_match.group(1)}/Buildings"
+
+    ext_id = _unique_ext_resource_id(text, f"{group_id}_building")
+    ext_line = f'[ext_resource type="PackedScene" path="{baked_res}" id="{ext_id}"]'
+    lines = text.split("\n")
+    ext_indexes = [index for index, line in enumerate(lines) if line.startswith("[ext_resource")]
+    if not ext_indexes:
+        raise ValueError(f"{scene_path} has no ext_resource block")
+    lines.insert(ext_indexes[-1] + 1, ext_line)
+    text = "\n".join(lines)
+
+    scale_text = "%g" % float(scale)
+    node_block = (
+        f'[node name="{node_name}" parent="{children_parent}" instance=ExtResource("{ext_id}")]\n'
+        f"transform = Transform3D({scale_text}, 0, 0, 0, {scale_text}, 0, 0, 0, {scale_text}, -50, 0, 0)\n"
+        f'building_name = "{building_name}"\n'
+        "floor_separation_distance = 15.789474\n"
+        "context_floor_separation = 52.63158\n"
+        "lid_move_distance = 42.105263\n"
+    )
+    marker = f'parent="{children_parent}"'
+    last_child = text.rfind(marker)
+    if last_child == -1:
+        raise ValueError(f"{scene_path} Buildings node has no existing child to anchor after")
+    next_node = text.find("[node", last_child)
+    if next_node == -1:
+        text = text.rstrip("\n") + "\n\n" + node_block
+    else:
+        text = text[:next_node] + node_block + "\n" + text[next_node:]
+
+    scene_path.write_text(text, encoding="utf-8", newline="\n")
+    return {"building_main": str(scene_path), "changed": True, "node_name": node_name, "ext_id": ext_id}
+
+
+def wire_campus_main(
+    godot_dir: str | Path,
+    group_id: str,
+    *,
+    campus_scene_rel: str = "Scene/Campus/CampusMain.tscn",
+) -> dict[str, Any]:
+    """Add the group's baked scene to CampusMain as an exterior-only prop.
+
+    Pure text insertion, mirroring ``wire_building_main``: unlike the generated
+    ``apply_*_campus_placement.gd`` scripts this never instantiates and
+    re-packs the hand-made campus scene, so an editor/CLI version mismatch
+    cannot reformat or localize the rest of CampusMain. Idempotent.
+
+    Reads ``Assets/Buildings/<Dir>/<id>_campus_placement.json`` (written by
+    ``publish_group_to_unimate``) for the transform and entrance marker.
+    """
+    godot_path = Path(godot_dir)
+    scene_path = godot_path / campus_scene_rel
+    if not scene_path.exists():
+        raise FileNotFoundError(scene_path)
+    placement_path = (
+        godot_path / "Assets" / "Buildings" / asset_dir_name(group_id) / f"{group_id}_campus_placement.json"
+    )
+    if not placement_path.exists():
+        raise FileNotFoundError(placement_path)
+    placement = json.loads(placement_path.read_text(encoding="utf-8"))
+
+    text = scene_path.read_text(encoding="utf-8")
+    node_name = str(placement.get("node_name") or asset_dir_name(group_id))
+    baked_res = str(placement.get("scene_path") or f"res://Scene/{group_id}_baked_full.tscn")
+
+    parent_match = re.search(r'\[node name="Buildings"[^\]]*parent="([^"]+)"', text)
+    if parent_match is None:
+        raise ValueError(f"{scene_path} has no Buildings node to attach to")
+    children_parent = f"{parent_match.group(1)}/Buildings"
+
+    if baked_res in text or f'[node name="{node_name}" parent="{children_parent}"' in text:
+        return {"campus_main": str(scene_path), "changed": False, "node_name": node_name}
+
+    ext_id = _unique_ext_resource_id(text, f"{group_id}_campus_building")
+    ext_line = f'[ext_resource type="PackedScene" path="{baked_res}" id="{ext_id}"]'
+    lines = text.split("\n")
+    ext_indexes = [index for index, line in enumerate(lines) if line.startswith("[ext_resource")]
+    if not ext_indexes:
+        raise ValueError(f"{scene_path} has no ext_resource block")
+    lines.insert(ext_indexes[-1] + 1, ext_line)
+    text = "\n".join(lines)
+
+    transform_literal = str(placement.get("transform", {}).get("godot") or "")
+    if not transform_literal:
+        raise ValueError(f"{placement_path} has no transform.godot literal")
+    entrance = placement.get("entrance") or {}
+    anchor = entrance.get("anchor") or [0.0, 0.0, 0.0]
+    size = entrance.get("marker_size") or [30.0, 30.0, 30.0]
+    marker_name = str(entrance.get("marker_name") or "Entrance")
+    node_block = (
+        f'[node name="{node_name}" parent="{children_parent}" instance=ExtResource("{ext_id}")]\n'
+        f"transform = {transform_literal}\n"
+        "exterior_only = true\n"
+        "\n"
+        f'[node name="{marker_name}" type="CSGBox3D" parent="{children_parent}/{node_name}"]\n'
+        f"transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, {_num(anchor[0])}, {_num(anchor[1])}, {_num(anchor[2])})\n"
+        f"size = Vector3({_num(size[0])}, {_num(size[1])}, {_num(size[2])})\n"
+        "visible = false\n"
+    )
+
+    # Insert after the last node that lives under the Buildings subtree
+    # (direct children AND their Entrance markers), so the new building block
+    # never lands between an existing building and its own children.
+    subtree_marker = f'parent="{children_parent}'
+    last_subtree = text.rfind(subtree_marker)
+    if last_subtree == -1:
+        raise ValueError(f"{scene_path} Buildings node has no existing child to anchor after")
+    next_node = text.find("[node", last_subtree)
+    if next_node == -1:
+        text = text.rstrip("\n") + "\n\n" + node_block
+    else:
+        text = text[:next_node] + node_block + "\n" + text[next_node:]
+
+    scene_path.write_text(text, encoding="utf-8", newline="\n")
+    return {"campus_main": str(scene_path), "changed": True, "node_name": node_name, "ext_id": ext_id}
+
+
+def _num(value: Any) -> str:
+    return ("%g" % float(value))
+
+
+def _unique_ext_resource_id(text: str, base: str) -> str:
+    if f'id="{base}"' not in text:
+        return base
+    for suffix in range(2, 100):
+        candidate = f"{base}_{suffix}"
+        if f'id="{candidate}"' not in text:
+            return candidate
+    raise ValueError(f"Could not allocate a unique ext_resource id for {base}")
 
 
 def _copy_floor_assets(export_dir: Path, asset_dir: Path, group_id: str, manifest: dict[str, Any]) -> list[Path]:
@@ -226,7 +388,7 @@ func _run() -> void:
 \t\tawait process_frame
 \t\tawait physics_frame
 
-\tvar baked_count := 0
+\tvar navigation_polygon_count := 0
 \tfor floor_index in range(floors.get_child_count()):
 \t\tvar floor := floors.get_child(floor_index) as Node3D
 \t\tif floor == null:
@@ -246,12 +408,13 @@ func _run() -> void:
 \t\t\t_fail("%s is missing NavigationRegion3D/FloorMesh/FloorVisual" % floor.name, root)
 \t\t\treturn
 
-\t\t_configure_navigation_mesh(region)
-\t\tregion.bake_navigation_mesh(false)
+\t\t# The source scene already contains the NavigationMesh used to build the
+\t\t# portal topology. Preserve that exact resource so the published scene
+\t\t# cannot disagree with the topology after a second, lossy Godot bake.
 \t\tif region.navigation_mesh == null or region.navigation_mesh.get_polygon_count() <= 0:
-\t\t\t_fail("Baked NavigationMesh is empty for %s" % floor.name, root)
+\t\t\t_fail("Source NavigationMesh is empty for %s" % floor.name, root)
 \t\t\treturn
-\t\tbaked_count += region.navigation_mesh.get_polygon_count()
+\t\tnavigation_polygon_count += region.navigation_mesh.get_polygon_count()
 
 \tvar packed := PackedScene.new()
 \tvar pack_result := packed.pack(root)
@@ -264,32 +427,10 @@ func _run() -> void:
 \t\t_fail("Could not save scene %s: %s" % [OUTPUT_SCENE, error_string(save_result)], root)
 \t\treturn
 
-\tprint("Saved %s with %d baked nav polygons across %d floors" % [OUTPUT_SCENE, baked_count, floors.get_child_count()])
+\tprint("Saved %s with %d authored nav polygons across %d floors" % [OUTPUT_SCENE, navigation_polygon_count, floors.get_child_count()])
 \troot.queue_free()
 \tawait process_frame
 \tquit(0)
-
-
-func _configure_navigation_mesh(region: NavigationRegion3D) -> void:
-\tregion.navigation_layers = 1
-\tvar mesh := NavigationMesh.new()
-\tmesh.agent_radius = 0.25
-\tmesh.agent_height = 1.8
-\tmesh.agent_max_climb = 0.4
-\tmesh.agent_max_slope = 45.0
-\tmesh.cell_size = 0.25
-\tmesh.cell_height = 0.25
-\tmesh.edge_max_error = 1.3
-\tmesh.edge_max_length = 0.0
-\tmesh.region_min_size = 2.0
-\tmesh.region_merge_size = 20.0
-\tmesh.vertices_per_polygon = 6.0
-\tmesh.detail_sample_distance = 6.0
-\tmesh.detail_sample_max_error = 1.0
-\tmesh.filter_baking_aabb = AABB()
-\tmesh.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_MESH_INSTANCES
-\tmesh.geometry_source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN
-\tregion.navigation_mesh = mesh
 
 
 func _remove_nodes_named(root: Node, node_name: String) -> void:
@@ -521,6 +662,9 @@ func _upsert_building(scene_root: Node, buildings: Node3D, placement: Dictionary
 \t\treturn false
 \tbuilding.name = node_name
 \tbuilding.set("building_name", building_id)
+\t# Campus instances are exterior props: skip portal scans, keep nav regions
+\t# off, and never claim Navigator ownership from the BuildingMain instances.
+\tbuilding.set("exterior_only", true)
 \tbuilding.transform = _transform_from_placement(placement)
 \tbuildings.add_child(building)
 \tbuilding.owner = scene_root
@@ -582,6 +726,16 @@ def _run_godot_script(godot_dir: Path, script_path: Path, godot_bin: str) -> Non
     )
 
 
+def _run_godot_import(godot_dir: Path, godot_bin: str) -> None:
+    """Import newly copied assets so scripts can load() them. Best-effort:
+    Godot can exit non-zero on import warnings, and the bake fails loudly if a
+    resource is genuinely missing, so a non-zero import here is not fatal."""
+    subprocess.run(
+        [godot_bin, "--headless", "--path", str(godot_dir), "--import"],
+        check=False,
+    )
+
+
 def _single_existing(directory: Path, pattern: str) -> Path:
     matches = sorted(directory.glob(pattern))
     if not matches:
@@ -589,3 +743,481 @@ def _single_existing(directory: Path, pattern: str) -> Path:
     if len(matches) > 1:
         raise ValueError(f"Expected one {pattern} in {directory}, found {len(matches)}")
     return matches[0]
+
+
+# ===========================================================================
+# Campus paths: publish the generated road mesh + nav into CampusMain.
+# ===========================================================================
+
+def publish_campus_paths_to_unimate(
+    export_dir: str | Path,
+    godot_dir: str | Path,
+    cfg,
+    *,
+    run_bake: bool = False,
+    apply_to_campus: bool = False,
+    run_probe: bool = False,
+    godot_bin: str = "godot",
+) -> dict[str, Any]:
+    """Copy the campus road artifacts into Godot and (optionally) bake + wire them.
+
+    Machine-owned outputs (campus_roads_source/baked.tscn, the GLB, the graph
+    JSON) are overwritten wholesale; CampusMain is edited only by the idempotent
+    apply script, mirroring the building publish flow.
+    """
+    export_path = Path(export_dir)
+    godot_path = Path(godot_dir)
+    asset_dir = godot_path / "Assets" / "Campus"
+    scene_dir = godot_path / "Scene"
+    tools_dir = godot_path / "tools"
+    for directory in (asset_dir, scene_dir, tools_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    copied: list[Path] = []
+    required = ("campus_roads.glb", "campus_paths_graph.json", "campus_paths_stats.json")
+    optional = ("campus_building_routes.json",)
+    for name in required:
+        source = export_path / name
+        if not source.exists():
+            raise FileNotFoundError(source)
+        target = asset_dir / name
+        shutil.copy2(source, target)
+        copied.append(target)
+    for name in optional:
+        source = export_path / name
+        if source.exists():
+            target = asset_dir / name
+            shutil.copy2(source, target)
+            copied.append(target)
+
+    roads_node = cfg.roads_node_name
+    source_scene = scene_dir / "campus_roads_source.tscn"
+    source_scene.write_text(_campus_roads_source_scene(roads_node), encoding="utf-8", newline="\n")
+
+    bake_script = tools_dir / "generate_campus_roads_baked_scene.gd"
+    check_script = tools_dir / "check_campus_roads.gd"
+    apply_script = tools_dir / "apply_campus_roads.gd"
+    probe_script = tools_dir / "probe_campus_roads_nav.gd"
+    bake_script.write_text(_campus_bake_script(roads_node, cfg.output_scene), encoding="utf-8", newline="\n")
+    check_script.write_text(_campus_check_script(roads_node, cfg.output_scene), encoding="utf-8", newline="\n")
+    apply_script.write_text(_campus_apply_roads_script(cfg), encoding="utf-8", newline="\n")
+    probe_script.write_text(_campus_probe_script(cfg), encoding="utf-8", newline="\n")
+
+    result: dict[str, Any] = {
+        "asset_dir": asset_dir,
+        "source_scene": source_scene,
+        "baked_scene": scene_dir / "campus_roads_baked.tscn",
+        "bake_script": bake_script,
+        "check_script": check_script,
+        "apply_script": apply_script,
+        "probe_script": probe_script,
+        "copied": copied,
+    }
+    if run_bake:
+        _run_godot_import(godot_path, godot_bin)
+        _run_godot_script(godot_path, bake_script, godot_bin)
+        _run_godot_script(godot_path, check_script, godot_bin)
+    if apply_to_campus:
+        # Text insertion instead of the generated apply script: see
+        # wire_campus_roads for why CampusMain is never re-packed here.
+        result["campus_wiring"] = wire_campus_roads(godot_path, cfg)
+    if run_probe:
+        _run_godot_script(godot_path, probe_script, godot_bin)
+        # Gate on the nav map the game actually routes on (entrance snap and
+        # reachability for every building pair). The retired optimal-line
+        # probe validated CampusMain._precomputed_campus_waypoints, an API
+        # removed when the drawn line became the agent's real path.
+        _run_godot_script(godot_path, tools_dir / "probe_campus_game_nav.gd", godot_bin)
+    return result
+
+
+def wire_campus_roads(
+    godot_dir: str | Path,
+    cfg,
+) -> dict[str, Any]:
+    """Text-wire the baked campus roads scene into CampusMain.
+
+    Same rationale as wire_campus_main: the generated apply script re-packs
+    the whole hand-made campus scene, which reformats it when the local Godot
+    build differs from the editor's. This inserts one instance node with the
+    Buildings node's transform instead. Idempotent.
+    """
+    godot_path = Path(godot_dir)
+    scene_path = godot_path / cfg.campus_scene.removeprefix("res://")
+    text = scene_path.read_text(encoding="utf-8")
+    roads_res = "res://Scene/campus_roads_baked.tscn"
+    if roads_res in text or f'[node name="{cfg.roads_node_name}"' in text:
+        return {"campus_main": str(scene_path), "changed": False}
+
+    buildings_match = re.search(
+        r'\[node name="Buildings"[^\]]*parent="([^"]+)"[^\]]*\]\n(transform = [^\n]+)?',
+        text,
+    )
+    if buildings_match is None:
+        raise ValueError(f"{scene_path} has no Buildings node")
+    subviewport_parent = buildings_match.group(1)
+    # Road vertices are authored in Buildings-parent placement space, so the
+    # roads root carries the exact same transform as the Buildings node.
+    transform_line = buildings_match.group(2) or "transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)"
+
+    ext_id = _unique_ext_resource_id(text, "campus_roads_scene")
+    ext_line = f'[ext_resource type="PackedScene" path="{roads_res}" id="{ext_id}"]'
+    lines = text.split("\n")
+    ext_indexes = [index for index, line in enumerate(lines) if line.startswith("[ext_resource")]
+    lines.insert(ext_indexes[-1] + 1, ext_line)
+    text = "\n".join(lines)
+
+    node_block = (
+        f'[node name="{cfg.roads_node_name}" parent="{subviewport_parent}" instance=ExtResource("{ext_id}")]\n'
+        f"{transform_line}\n"
+    )
+    buildings_header = text.find('[node name="Buildings"')
+    text = text[:buildings_header] + node_block + "\n" + text[buildings_header:]
+    scene_path.write_text(text, encoding="utf-8", newline="\n")
+    return {"campus_main": str(scene_path), "changed": True, "ext_id": ext_id}
+
+
+def _campus_roads_source_scene(roads_node: str) -> str:
+    return f"""[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://Assets/Campus/campus_roads.glb" id="1_roads_glb"]
+
+[node name="{roads_node}" type="Node3D"]
+
+[node name="NavigationRegion3D" type="NavigationRegion3D" parent="."]
+
+[node name="RoadMesh" parent="NavigationRegion3D" instance=ExtResource("1_roads_glb")]
+"""
+
+
+def _campus_bake_script(roads_node: str, output_scene: str) -> str:
+    return f"""@tool
+extends SceneTree
+
+const SOURCE_SCENE := "res://Scene/campus_roads_source.tscn"
+const OUTPUT_SCENE := "{output_scene}"
+
+
+func _init() -> void:
+\tcall_deferred("_run")
+
+
+func _run() -> void:
+\tvar source := load(SOURCE_SCENE) as PackedScene
+\tif source == null:
+\t\t_fail("Could not load %s" % SOURCE_SCENE, null)
+\t\treturn
+\tvar root := source.instantiate() as Node3D
+\tif root == null:
+\t\t_fail("Could not instantiate %s" % SOURCE_SCENE, null)
+\t\treturn
+\troot.name = "{roads_node}"
+\tget_root().add_child(root)
+\t_assign_owner(root, root)
+\tfor _i in range(4):
+\t\tawait process_frame
+\t\tawait physics_frame
+
+\tvar region := root.get_node_or_null("NavigationRegion3D") as NavigationRegion3D
+\tif region == null:
+\t\t_fail("Source scene missing NavigationRegion3D", root)
+\t\treturn
+\t_configure_navigation_mesh(region)
+\tregion.bake_navigation_mesh(false)
+\tif region.navigation_mesh == null or region.navigation_mesh.get_polygon_count() <= 0:
+\t\t_fail("Baked campus roads NavigationMesh is empty", root)
+\t\treturn
+
+\tvar packed := PackedScene.new()
+\tvar pack_result := packed.pack(root)
+\tif pack_result != OK:
+\t\t_fail("Could not pack scene: %s" % error_string(pack_result), root)
+\t\treturn
+\tvar save_result := ResourceSaver.save(packed, OUTPUT_SCENE)
+\tif save_result != OK:
+\t\t_fail("Could not save %s: %s" % [OUTPUT_SCENE, error_string(save_result)], root)
+\t\treturn
+\tprint("Saved %s with %d campus road nav polygons" % [OUTPUT_SCENE, region.navigation_mesh.get_polygon_count()])
+\troot.queue_free()
+\tawait process_frame
+\tquit(0)
+
+
+func _configure_navigation_mesh(region: NavigationRegion3D) -> void:
+\tregion.navigation_layers = 1
+\tvar mesh := NavigationMesh.new()
+\t# Narrow agent so thin footpaths/spurs are not eroded into disconnected islands.
+\tmesh.agent_radius = 0.4
+\tmesh.agent_height = 1.8
+\tmesh.agent_max_climb = 0.5
+\tmesh.agent_max_slope = 45.0
+\t# Match the campus/world nav map cell size (0.25); a mismatched cell size makes
+\t# NavigationServer3D silently reject this region from the shared map.
+\tmesh.cell_size = 0.25
+\tmesh.cell_height = 0.25
+\tmesh.region_min_size = 2.0
+\tmesh.region_merge_size = 20.0
+\tmesh.edge_max_error = 1.3
+\tmesh.vertices_per_polygon = 6.0
+\tmesh.detail_sample_distance = 6.0
+\tmesh.detail_sample_max_error = 1.0
+\tmesh.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_MESH_INSTANCES
+\tmesh.geometry_source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN
+\tregion.navigation_mesh = mesh
+
+
+func _assign_owner(node: Node, owner_node: Node) -> void:
+\tif node != owner_node:
+\t\tnode.owner = owner_node
+\tif node != owner_node and not node.scene_file_path.is_empty():
+\t\treturn
+\tfor child in node.get_children():
+\t\t_assign_owner(child, owner_node)
+
+
+func _fail(message: String, root: Node) -> void:
+\tpush_error(message)
+\tif root != null:
+\t\troot.queue_free()
+\tquit(1)
+"""
+
+
+def _campus_check_script(roads_node: str, output_scene: str) -> str:
+    return f"""extends SceneTree
+
+const BAKED_SCENE := "{output_scene}"
+
+
+func _init() -> void:
+\tcall_deferred("_run")
+
+
+func _run() -> void:
+\tvar failures: Array[String] = []
+\tvar scene := load(BAKED_SCENE) as PackedScene
+\tif scene == null:
+\t\tpush_error("Could not load %s" % BAKED_SCENE)
+\t\tquit(1)
+\t\treturn
+\tvar root := scene.instantiate() as Node3D
+\tif root == null:
+\t\tpush_error("Could not instantiate %s" % BAKED_SCENE)
+\t\tquit(1)
+\t\treturn
+\tget_root().add_child(root)
+\tfor _i in range(2):
+\t\tawait process_frame
+\tif root.name != "{roads_node}":
+\t\tfailures.append("Expected root {roads_node}, got %s" % root.name)
+\tvar region := root.get_node_or_null("NavigationRegion3D") as NavigationRegion3D
+\tif region == null:
+\t\tfailures.append("Missing NavigationRegion3D")
+\telif region.navigation_mesh == null or region.navigation_mesh.get_polygon_count() <= 0:
+\t\tfailures.append("NavigationMesh has no polygons")
+\tif root.get_node_or_null("NavigationRegion3D/RoadMesh") == null:
+\t\tfailures.append("Missing NavigationRegion3D/RoadMesh")
+\troot.queue_free()
+\tawait process_frame
+\tif not failures.is_empty():
+\t\tfor failure in failures:
+\t\t\tpush_error(failure)
+\t\tquit(1)
+\t\treturn
+\tprint("campus_roads_baked structure OK")
+\tquit(0)
+"""
+
+
+def _campus_apply_roads_script(cfg) -> str:
+    return f"""@tool
+extends SceneTree
+
+const CAMPUS_SCENE := "{cfg.campus_scene}"
+const ROADS_SCENE := "res://Scene/campus_roads_baked.tscn"
+const BUILDINGS_PARENT := "{cfg.buildings_parent}"
+const SUBVIEWPORT_PARENT := "{cfg.subviewport_parent}"
+const ROADS_NODE := "{cfg.roads_node_name}"
+
+
+func _init() -> void:
+\tcall_deferred("_run")
+
+
+func _run() -> void:
+\tvar campus := load(CAMPUS_SCENE) as PackedScene
+\tif campus == null:
+\t\t_fail("Could not load %s" % CAMPUS_SCENE, null)
+\t\treturn
+\tvar root := campus.instantiate()
+\tif root == null:
+\t\t_fail("Could not instantiate %s" % CAMPUS_SCENE, null)
+\t\treturn
+\tget_root().add_child(root)
+
+\tvar subviewport := root.get_node_or_null(NodePath(SUBVIEWPORT_PARENT))
+\tif subviewport == null:
+\t\t_fail("Could not find SubViewport parent: %s" % SUBVIEWPORT_PARENT, root)
+\t\treturn
+\tvar buildings := root.get_node_or_null(NodePath(BUILDINGS_PARENT)) as Node3D
+\tif buildings == null:
+\t\t_fail("Could not find Buildings node: %s" % BUILDINGS_PARENT, root)
+\t\treturn
+
+\tfor child in subviewport.get_children():
+\t\tif child.name == ROADS_NODE:
+\t\t\tsubviewport.remove_child(child)
+\t\t\tchild.queue_free()
+
+\tvar roads_scene := load(ROADS_SCENE) as PackedScene
+\tif roads_scene == null:
+\t\t_fail("Could not load %s" % ROADS_SCENE, root)
+\t\treturn
+\tvar roads := roads_scene.instantiate() as Node3D
+\tif roads == null:
+\t\t_fail("Could not instantiate %s" % ROADS_SCENE, root)
+\t\treturn
+\troads.name = ROADS_NODE
+\t# Road vertices are authored in Buildings-parent placement space, so the roads
+\t# root carries the exact same transform as the Buildings node -> aligned.
+\troads.transform = buildings.transform
+\tsubviewport.add_child(roads)
+\t_assign_owner(roads, root)
+
+\tvar packed := PackedScene.new()
+\tvar pack_result := packed.pack(root)
+\tif pack_result != OK:
+\t\t_fail("Could not pack campus scene: %s" % error_string(pack_result), root)
+\t\treturn
+\tvar save_result := ResourceSaver.save(packed, CAMPUS_SCENE)
+\tif save_result != OK:
+\t\t_fail("Could not save %s: %s" % [CAMPUS_SCENE, error_string(save_result)], root)
+\t\treturn
+\tprint("Applied campus roads (%s) to %s" % [ROADS_NODE, CAMPUS_SCENE])
+\troot.queue_free()
+\tawait process_frame
+\tquit(0)
+
+
+func _assign_owner(node: Node, owner_node: Node) -> void:
+\tif node != owner_node:
+\t\tnode.owner = owner_node
+\tif node != owner_node and not node.scene_file_path.is_empty():
+\t\treturn
+\tfor child in node.get_children():
+\t\t_assign_owner(child, owner_node)
+
+
+func _fail(message: String, root: Node) -> void:
+\tpush_error(message)
+\tif root != null:
+\t\troot.queue_free()
+\tquit(1)
+"""
+
+
+def _campus_probe_script(cfg) -> str:
+    return f"""extends SceneTree
+
+const CAMPUS_SCENE := "{cfg.campus_scene}"
+const BUILDINGS_PARENT := "{cfg.buildings_parent}"
+const ROADS_PATH := "{cfg.subviewport_parent}/{cfg.roads_node_name}"
+const MAX_SNAP := {cfg.entrance_spur_max_m + 20.0}
+
+
+func _init() -> void:
+\tcall_deferred("_run")
+
+
+func _run() -> void:
+\tvar scene := load(CAMPUS_SCENE) as PackedScene
+\tif scene == null:
+\t\tpush_error("Could not load %s" % CAMPUS_SCENE)
+\t\tquit(1)
+\t\treturn
+\tvar root := scene.instantiate()
+\tif root == null:
+\t\tpush_error("Could not instantiate %s" % CAMPUS_SCENE)
+\t\tquit(1)
+\t\treturn
+\tget_root().add_child(root)
+\tfor _i in range(6):
+\t\tawait physics_frame
+
+\tvar roads := root.get_node_or_null(NodePath(ROADS_PATH)) as Node3D
+\tif roads == null:
+\t\tpush_error("Campus roads node missing at %s" % ROADS_PATH)
+\t\tquit(1)
+\t\treturn
+\tvar region := roads.get_node_or_null("NavigationRegion3D") as NavigationRegion3D
+\tif region == null or region.navigation_mesh == null or region.navigation_mesh.get_polygon_count() <= 0:
+\t\tpush_error("Campus roads NavigationRegion3D not baked")
+\t\tquit(1)
+\t\treturn
+\t# Build a dedicated single-region map from the roads mesh, exactly as the game's
+\t# CampusMain._setup_campus_navigation_map does for the NPC, so this proves what
+\t# the NPC will actually walk on (independent of shared-world sync timing).
+\tvar map := NavigationServer3D.map_create()
+\tNavigationServer3D.map_set_active(map, true)
+\tNavigationServer3D.map_set_use_async_iterations(map, false)
+\tNavigationServer3D.map_set_cell_size(map, region.navigation_mesh.cell_size)
+\tNavigationServer3D.map_set_cell_height(map, region.navigation_mesh.cell_height)
+\tvar nav_rid := NavigationServer3D.region_create()
+\tNavigationServer3D.region_set_use_async_iterations(nav_rid, false)
+\tNavigationServer3D.region_set_navigation_mesh(nav_rid, region.navigation_mesh)
+\tNavigationServer3D.region_set_transform(nav_rid, region.global_transform)
+\tNavigationServer3D.region_set_enabled(nav_rid, true)
+\tNavigationServer3D.region_set_map(nav_rid, map)
+\tfor _w in range(24):
+\t\tNavigationServer3D.map_force_update(map)
+\t\tawait physics_frame
+
+\tvar buildings := root.get_node_or_null(NodePath(BUILDINGS_PARENT))
+\tvar entrances := _entrances(buildings)
+\tif entrances.size() < 2:
+\t\tpush_error("Need >=2 building entrances to probe, found %d" % entrances.size())
+\t\tquit(1)
+\t\treturn
+
+\tvar failures: Array[String] = []
+\tvar names := entrances.keys()
+\tfor i in range(names.size()):
+\t\tfor j in range(i + 1, names.size()):
+\t\t\tvar a: Vector3 = entrances[names[i]]
+\t\t\tvar b: Vector3 = entrances[names[j]]
+\t\t\tvar from := NavigationServer3D.map_get_closest_point(map, a)
+\t\t\tvar to := NavigationServer3D.map_get_closest_point(map, b)
+\t\t\tvar snap_a := from.distance_to(a)
+\t\t\tvar snap_b := to.distance_to(b)
+\t\t\tvar path := NavigationServer3D.map_get_path(map, from, to, true)
+\t\t\tvar span := 0.0
+\t\t\tif path.size() >= 2:
+\t\t\t\tspan = path[0].distance_to(path[path.size() - 1])
+\t\t\tif snap_a > MAX_SNAP or snap_b > MAX_SNAP:
+\t\t\t\tfailures.append("%s<->%s snap too far (%.1f / %.1f)" % [names[i], names[j], snap_a, snap_b])
+\t\t\telif path.size() < 2 or span < a.distance_to(b) * 0.4:
+\t\t\t\tfailures.append("%s<->%s no road path (points=%d span=%.1f)" % [names[i], names[j], path.size(), span])
+\t\t\telse:
+\t\t\t\tprint("  %s -> %s : points=%d span=%.1f  OK" % [names[i], names[j], path.size(), span])
+
+\troot.queue_free()
+\tawait process_frame
+\tif not failures.is_empty():
+\t\tfor failure in failures:
+\t\t\tpush_error(failure)
+\t\tquit(1)
+\t\treturn
+\tprint("CAMPUS ROADS NAV OK")
+\tquit(0)
+
+
+func _entrances(buildings: Node) -> Dictionary:
+\tvar result := {{}}
+\tif buildings == null:
+\t\treturn result
+\tfor child in buildings.get_children():
+\t\tvar entrance := child.get_node_or_null("Entrance") as Node3D
+\t\tif entrance != null:
+\t\t\tresult[str(child.name)] = entrance.global_position
+\treturn result
+"""

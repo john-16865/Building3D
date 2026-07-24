@@ -1,0 +1,68 @@
+# Campus outdoor path/road generation for UNIMATE's CampusMain scene.
+# Sampled from the MapsIndoors directions graph and projected into CampusMain
+# placement space using the same reference as configs/unimate_campus_placement.yaml.
+
+graph_id: CITY_CAMPUS_Graph
+
+reference:
+  building_id: science
+  lon: 174.76818825
+  lat: -36.852228925
+  local_anchor: [-18.06752, 0.0, 119.648]
+  origin: [-162.63676, 0.45404053, 860.31226]
+  scale: 0.89260983
+
+# Sampling breadth.
+hub_count: 5
+building_pair_neighbors: 3
+max_targets: 140
+
+# Graph cleanup (metres before placement scaling).
+snap_m: 2.5
+simplify_m: 1.0
+min_stub_m: 6.0
+
+# Road surface height in CampusMain (matches the hand-drawn roads ~0.35).
+road_y: 0.35
+
+# Road widths by OSM highway class, metres.
+widths_m:
+  footway: 3.0
+  path: 3.0
+  residential: 5.0
+  service: 3.5
+  steps: 2.5
+  spur: 4.0
+  # Indoor-gap bridges that keep a building-to-building route connected where
+  # MapsIndoors passes through a building. Kept narrow and muted.
+  connector: 3.0
+
+# Max entrance->nearest-road spur length (metres) before an entrance is left
+# unconnected (reported in stats). Set to reach the most set-back building:
+# acoustics' hand-authored street door sits ~84 m from the sampled pedestrian
+# network now that indoor route tails no longer mesh fake stubs near doors
+# (OGGB/Business previously drove this at ~67 m).
+entrance_spur_max_m: 100.0
+
+# Legacy buildings placed in CampusMain before the publish pipeline existed have
+# no *_campus_placement.json to glob; list their entrance points here so they
+# still get a spur. Values are the buildings' Entrance-node positions in
+# Buildings-parent placement space (global Z + 750.5667), measured live from
+# CampusMain so the spur lands on the actual door, not the building centre.
+extra_entrances:
+  - building_id: science
+    x: -178.77
+    z: 753.52
+  - building_id: engineering
+    x: 5.2
+    z: 863.4
+  - building_id: kate
+    x: -60.2
+    z: 715.5
+
+# CampusMain integration targets.
+campus_scene: res://Scene/Campus/CampusMain.tscn
+buildings_parent: GameLayer/HBox/VBoxContainer/ViewportContainer/SubViewport/Buildings
+subviewport_parent: GameLayer/HBox/VBoxContainer/ViewportContainer/SubViewport
+roads_node_name: CampusRoads
+output_scene: res://Scene/campus_roads_baked.tscn

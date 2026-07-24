@@ -21,6 +21,16 @@ MATERIAL_COLORS = {
     "door_point_medium": (1.0, 0.7, 0.0, 1.0),
     "door_point_low": (0.55, 0.05, 0.95, 1.0),
     "door_point_unknown": (1.0, 1.0, 1.0, 1.0),
+    "wall_open_door": (1.0, 0.9, 0.0, 1.0),
+    "wall_open_route": (1.0, 0.0, 0.0, 1.0),
+    "campus_road": (0.16, 0.16, 0.17, 1.0),
+    "campus_footpath": (0.55, 0.52, 0.47, 1.0),
+    "campus_service": (0.30, 0.31, 0.33, 1.0),
+    "campus_steps": (0.62, 0.40, 0.28, 1.0),
+    "campus_spur": (0.45, 0.50, 0.45, 1.0),
+    "campus_connector": (0.42, 0.44, 0.50, 1.0),
+    "campus_context": (0.78, 0.77, 0.74, 1.0),
+    "campus_context_roof": (0.68, 0.68, 0.66, 1.0),
     "default": (0.65, 0.65, 0.65, 1.0),
 }
 

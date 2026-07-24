@@ -1,0 +1,41 @@
+[
+  {
+    "aliases": [
+      "acoustics_entry_001",
+      "MainDoor",
+      "Main entrance",
+      "Architecture Acoustics Laboratory Main entrance",
+      "acoustics Main entrance",
+      "acoustics entry 1",
+      "acoustics door 1",
+      "acoustics entrance"
+    ],
+    "anchor": [
+      -7.815632,
+      0.0,
+      -11.222075
+    ],
+    "confidence": "high",
+    "display_name": "Main entrance",
+    "entry_id": "acoustics_entry_001",
+    "external_id": "acoustics_entry_001",
+    "floor_index": 1,
+    "floor_name": "1",
+    "kind": "door",
+    "lat": -36.85404185,
+    "logical_building_id": "acoustics",
+    "lon": 174.76988625,
+    "node_name": "MainDoor",
+    "source": "manual_courtyard_facing_main_architecture",
+    "source_building_admin_id": "422",
+    "source_entry_id": "acoustics_entry_001",
+    "source_external_id": "acoustics_entry_001",
+    "source_floor": null,
+    "source_id": "acoustics_entry_001",
+    "supporting_routes": 0,
+    "target_building_admin_ids": [
+      "422"
+    ],
+    "target_external_ids": []
+  }
+]

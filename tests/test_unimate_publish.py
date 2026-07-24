@@ -77,6 +77,10 @@ def test_publish_group_to_unimate_generates_source_bake_and_check_files(tmp_path
     assert 'const OUTPUT_SCENE := "res://Scene/business_baked_full.tscn"' in bake_text
     assert 'const EXPECTED_FLOORS := ["B-1", "G"]' in bake_text
     assert 'root.name = "BusinessBakedFull"' in bake_text
+    assert "Source NavigationMesh is empty" in bake_text
+    assert "authored nav polygons" in bake_text
+    assert "bake_navigation_mesh" not in bake_text
+    assert "NavigationMesh.new()" not in bake_text
     check_text = (godot_dir / "tools" / "check_business_full_scene.gd").read_text(encoding="utf-8")
     assert 'const BAKED_SCENE := "res://Scene/business_baked_full.tscn"' in check_text
     assert 'business_full_floor_b1_visual.glb' in check_text

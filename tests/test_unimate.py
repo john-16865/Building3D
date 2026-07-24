@@ -10,8 +10,13 @@ def test_room_node_name_preserves_source_prefix_and_display_name():
 
 
 def test_portal_node_name_uses_unimate_set_suffixes():
-    assert portal_node_name("302-100E1", "Elevator", "elevator", "E1") == "302 100E1_Elevator_SetE1"
-    assert portal_node_name("302-100S2", "Stairs", "stair", "S2") == "302 100S2_Stairs_Set2"
+    # Member-prefixed set ids: every wing keeps its own physical shaft, so
+    # UNIMATE's _Set-suffix grouping never fuses stairs from different wings.
+    assert portal_node_name("302-100E1", "Elevator", "elevator", "E1") == "302 100E1_Elevator_Set302E1"
+    assert portal_node_name("302-100S2", "Stairs", "stair", "S2") == "302 100S2_Stairs_Set302S2"
+    # Without a member prefix (single-building ids) the legacy style remains.
+    assert portal_node_name("100E1", "Elevator", "elevator", "E1") == "100E1_Elevator_SetE1"
+    assert portal_node_name("100S2", "Stairs", "stair", "S2") == "100S2_Stairs_Set2"
 
 
 def test_write_unimate_scene_creates_floor_room_and_portal_nodes(tmp_path):

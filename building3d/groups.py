@@ -157,7 +157,11 @@ def generate_group(
         export_dir,
         group.id,
     )
-    scene_navigation_meshes = route_navigation_meshes if route_navigation_meshes else meshes
+    scene_navigation_meshes = _scene_navigation_meshes_with_floor_fallback(
+        route_navigation_meshes,
+        meshes,
+        manifest.get("floors", []),
+    )
     if route_nav_stats:
         route_nav_stats["route_wall_openings"] = _route_wall_opening_stats(route_wall_openings)
         manifest.setdefault("nav", {})["validation"] = route_nav_stats
@@ -195,9 +199,15 @@ def generate_group(
         ],
     }
     manifest = refresh_generation_hash(manifest)
+    # Topology proofs must run on the meshes the baked scene actually ships:
+    # for route-covered floors these ARE the route meshes, and for fallback
+    # floors (incl. whole buildings the directions graph never routes into,
+    # e.g. acoustics/kenneth_myers/law_annex) the geometry meshes. Proving on
+    # route meshes only left those buildings with zero door->stair transfer
+    # edges, so every cross-floor route was rejected at build time.
     portal_topology = build_portal_topology(
         manifest,
-        route_navigation_meshes,
+        scene_navigation_meshes,
     )
     floor_visual_paths = {
         floor_index: f"{_unimate_asset_base(group)}/{filename}"
@@ -424,8 +434,16 @@ def _floor_sort_key(value: str) -> tuple[float, str]:
             return (-1.0, clean)
     if clean == "G":
         return (0.0, clean)
+    if clean == "SB":
+        # Sub-basement (architecture): between B-1 and B-2. Unrecognized
+        # labels used to fall through to the 10_000 sentinel, which became a
+        # 42000-unit floor height and a kilometre-tall campus prop.
+        return (-1.5, clean)
     if clean.startswith("M") and clean[1:].isdigit():
         return (float(clean[1:]) + 0.5, clean)
+    if clean.endswith("M") and clean[:-1].isdigit():
+        # Digit-first mezzanine style ("1M" = mezzanine above level 1).
+        return (float(clean[:-1]) + 0.5, clean)
     try:
         return (float(clean), clean)
     except ValueError:
@@ -437,10 +455,11 @@ def _floor_heights(floors: list[FloorRecord], default_spacing: float, basement_s
     for floor in floors:
         label = floor.floor_name
         sort_value = _floor_sort_key(label)[0]
-        if label.startswith("B-"):
-            heights[label] = round(sort_value * basement_spacing, 6)
-        elif label == "G":
+        if label == "G":
             heights[label] = 0.0
+        elif sort_value < 0.0:
+            # Below-ground levels (B-*, SB) use the tighter basement spacing.
+            heights[label] = round(sort_value * basement_spacing, 6)
         else:
             heights[label] = round(sort_value * default_spacing, 6)
     return heights
@@ -573,10 +592,16 @@ def _complete_route_navigation_meshes(
     if not route_meshes:
         return [], route_stats
 
+    # Floors without route coverage (e.g. a two-room mezzanine MapsIndoors
+    # never routes through) no longer discard the WHOLE building's route
+    # navmesh - that stripped every walkable path and topology transfer edge
+    # from Elam/art. The caller falls back to geometry meshes per missing
+    # floor instead; the gap is recorded for QA.
     required_floor_names = _required_navigation_floor_names(manifest)
     route_floor_names = {_floor_name_from_route_nav_mesh(mesh.name) for mesh in route_meshes}
-    if required_floor_names and not required_floor_names.issubset(route_floor_names):
-        return [], route_stats
+    missing_floor_names = sorted(required_floor_names - route_floor_names)
+    if missing_floor_names:
+        route_stats["floors_missing_route_coverage"] = missing_floor_names
     return route_meshes, route_stats
 
 
@@ -1588,7 +1613,21 @@ def _normalise_external_door(
     floor_name = _canonical_floor_name(str(item.get("floor_name") or "G"))
     floor_index = floor_index_by_name.get(floor_name.upper())
     if floor_index is None:
-        return None
+        # Route-derived entries are stamped with the campus graph's street
+        # level ("G"), but not every building names a floor that: Humanities'
+        # stack is "1".."9". External entries are street-level by
+        # construction, so resolve to the building's lowest non-basement
+        # floor instead of dropping the door - dropping every entry left the
+        # building without any placement entrance and aborted publishing.
+        ground_candidates = {
+            name: index
+            for name, index in floor_index_by_name.items()
+            if not name.startswith("B")
+        } or floor_index_by_name
+        if not ground_candidates:
+            return None
+        fallback_name, floor_index = min(ground_candidates.items(), key=lambda kv: kv[1])
+        floor_name = _canonical_floor_name(fallback_name)
     node_name = str(item.get("node_name") or _external_door_node_name(index))
     display_name = str(item.get("display_name") or ("Main entrance" if index == 1 else f"Entry {index}"))
     aliases = _external_door_aliases(group, entry_id, node_name, display_name, index)
@@ -2086,6 +2125,29 @@ def _anchor_distance(start: Any, end: Any) -> float:
     if not _valid_local_anchor(start) or not _valid_local_anchor(end):
         return 0.0
     return _distance_2d(float(start[0]), float(start[2]), float(end[0]), float(end[2]))
+
+
+def _scene_navigation_meshes_with_floor_fallback(
+    route_meshes: list[MeshData],
+    geometry_meshes: list[MeshData],
+    floors: list[dict[str, Any]],
+) -> list[MeshData]:
+    """Route-derived navmesh per floor, geometry navmesh for uncovered floors.
+
+    The scene navmesh must exist for EVERY floor that has rooms, but route
+    coverage can legitimately miss small mezzanines. Only the topology's
+    same-floor transfer proof stays route-only (a whole-slab fallback would
+    fabricate walkable bridges between physically separate wings).
+    """
+    if not route_meshes:
+        return geometry_meshes
+    covered_floor_names = {_floor_name_from_route_nav_mesh(mesh.name) for mesh in route_meshes}
+    fallback = [
+        mesh
+        for mesh in geometry_meshes
+        if _canonical_floor_name(mesh_floor_name(mesh.name)) not in covered_floor_names
+    ]
+    return route_meshes + fallback
 
 
 def _required_navigation_floor_names(manifest: dict[str, Any]) -> set[str]:
