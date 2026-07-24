@@ -388,7 +388,7 @@ func _run() -> void:
 \t\tawait process_frame
 \t\tawait physics_frame
 
-\tvar baked_count := 0
+\tvar navigation_polygon_count := 0
 \tfor floor_index in range(floors.get_child_count()):
 \t\tvar floor := floors.get_child(floor_index) as Node3D
 \t\tif floor == null:
@@ -408,12 +408,13 @@ func _run() -> void:
 \t\t\t_fail("%s is missing NavigationRegion3D/FloorMesh/FloorVisual" % floor.name, root)
 \t\t\treturn
 
-\t\t_configure_navigation_mesh(region)
-\t\tregion.bake_navigation_mesh(false)
+\t\t# The source scene already contains the NavigationMesh used to build the
+\t\t# portal topology. Preserve that exact resource so the published scene
+\t\t# cannot disagree with the topology after a second, lossy Godot bake.
 \t\tif region.navigation_mesh == null or region.navigation_mesh.get_polygon_count() <= 0:
-\t\t\t_fail("Baked NavigationMesh is empty for %s" % floor.name, root)
+\t\t\t_fail("Source NavigationMesh is empty for %s" % floor.name, root)
 \t\t\treturn
-\t\tbaked_count += region.navigation_mesh.get_polygon_count()
+\t\tnavigation_polygon_count += region.navigation_mesh.get_polygon_count()
 
 \tvar packed := PackedScene.new()
 \tvar pack_result := packed.pack(root)
@@ -426,32 +427,10 @@ func _run() -> void:
 \t\t_fail("Could not save scene %s: %s" % [OUTPUT_SCENE, error_string(save_result)], root)
 \t\treturn
 
-\tprint("Saved %s with %d baked nav polygons across %d floors" % [OUTPUT_SCENE, baked_count, floors.get_child_count()])
+\tprint("Saved %s with %d authored nav polygons across %d floors" % [OUTPUT_SCENE, navigation_polygon_count, floors.get_child_count()])
 \troot.queue_free()
 \tawait process_frame
 \tquit(0)
-
-
-func _configure_navigation_mesh(region: NavigationRegion3D) -> void:
-\tregion.navigation_layers = 1
-\tvar mesh := NavigationMesh.new()
-\tmesh.agent_radius = 0.25
-\tmesh.agent_height = 1.8
-\tmesh.agent_max_climb = 0.4
-\tmesh.agent_max_slope = 45.0
-\tmesh.cell_size = 0.25
-\tmesh.cell_height = 0.25
-\tmesh.edge_max_error = 1.3
-\tmesh.edge_max_length = 0.0
-\tmesh.region_min_size = 2.0
-\tmesh.region_merge_size = 20.0
-\tmesh.vertices_per_polygon = 6.0
-\tmesh.detail_sample_distance = 6.0
-\tmesh.detail_sample_max_error = 1.0
-\tmesh.filter_baking_aabb = AABB()
-\tmesh.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_MESH_INSTANCES
-\tmesh.geometry_source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN
-\tregion.navigation_mesh = mesh
 
 
 func _remove_nodes_named(root: Node, node_name: String) -> void:
