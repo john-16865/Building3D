@@ -395,7 +395,13 @@ def _drop_orphan_nodes(graph: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def load_building_entrances(godot_dir: Path | None, cfg: CampusPathsConfig) -> list[dict[str, Any]]:
-    """Entrance points in placement space, from published buildings + config extras."""
+    """Entrance points in placement space, from published buildings + config extras.
+
+    Every route-derived external entry gets its own spur, not just the primary
+    placement entrance: multi-wing buildings (Elam) are entered through
+    different doors depending on the destination wing, and the campus leg must
+    be able to end at any of them on the road network.
+    """
     entrances: list[dict[str, Any]] = []
     if godot_dir is not None:
         buildings_root = Path(godot_dir) / "Assets" / "Buildings"
@@ -404,15 +410,55 @@ def load_building_entrances(godot_dir: Path | None, cfg: CampusPathsConfig) -> l
                 placement = json.loads(placement_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
+            building_id = str(placement.get("building_id", placement_path.parent.name))
+            building_points: list[tuple[float, float]] = []
             point = _entrance_placement_point(placement)
             if point is not None:
-                entrances.append({"building_id": str(placement.get("building_id", placement_path.parent.name)), "x": point[0], "z": point[1]})
+                building_points.append(point)
+                entrances.append({"building_id": building_id, "x": point[0], "z": point[1]})
+            for entry_point in _external_entry_points(placement_path.parent, building_id, placement):
+                if any(math.hypot(entry_point[0] - px, entry_point[1] - pz) < 2.0 for px, pz in building_points):
+                    continue
+                building_points.append(entry_point)
+                entrances.append({"building_id": building_id, "x": entry_point[0], "z": entry_point[1]})
     for extra in cfg.extra_entrances:
         try:
             entrances.append({"building_id": str(extra.get("building_id", "extra")), "x": float(extra["x"]), "z": float(extra["z"])})
         except (KeyError, TypeError, ValueError):
             continue
     return entrances
+
+
+def _external_entry_points(
+    asset_dir: Path,
+    building_id: str,
+    placement: dict[str, Any],
+) -> list[tuple[float, float]]:
+    entries_path = asset_dir / f"{building_id}_full_external_entry_points_route_derived.json"
+    if not entries_path.exists():
+        return []
+    try:
+        entries = json.loads(entries_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    transform = placement.get("transform", {}) if isinstance(placement.get("transform", {}), dict) else {}
+    origin = transform.get("origin")
+    scale = float(placement.get("scale", 0.89260983))
+    if not (isinstance(origin, list) and len(origin) == 3):
+        return []
+    points: list[tuple[float, float]] = []
+    for entry in entries:
+        local = entry.get("local") if isinstance(entry, dict) else None
+        if not (isinstance(local, list) and len(local) == 3):
+            continue
+        # Same basis math as _entrance_placement_point: X keeps sign, Z flips.
+        points.append((
+            float(origin[0]) + scale * float(local[0]),
+            float(origin[2]) - scale * float(local[2]),
+        ))
+    return points
 
 
 def _entrance_placement_point(placement: dict[str, Any]) -> tuple[float, float] | None:
@@ -572,10 +618,19 @@ def build_building_route_polylines(
     }
     ids = sorted(pts)
     out: dict[str, list[list[float]]] = {}
+    failed_pairs = 0
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
-            route = _route(client, pts[a], pts[b])
+            try:
+                route = _route(client, pts[a], pts[b])
+            except Exception:
+                # Directions 404s for entrances the venue graph cannot reach
+                # (hand-authored doors on buildings MapsIndoors never routes
+                # into). Those buildings still join the network via their
+                # entrance spurs, which do not use the directions API.
+                failed_pairs += 1
+                continue
             if not route or str(route.get("status")) != "OK":
                 continue
             poly_lonlat = _route_polyline_lonlat(route)
@@ -584,6 +639,10 @@ def build_building_route_polylines(
             projected = [list(project_to_campus(lon, lat, ref)) for lon, lat in poly_lonlat]
             simplified = _simplify_polyline(projected, cfg.simplify_m * ref.scale)
             out[f"{a}|{b}"] = [[round(x, 3), round(z, 3)] for x, z in simplified]
+    if failed_pairs:
+        print(f"  building pair routes: {len(out)} OK, {failed_pairs} unroutable (skipped)", flush=True)
+    if not out and failed_pairs:
+        raise SystemExit("Every building pair route failed - directions API down?")
     return out
 
 

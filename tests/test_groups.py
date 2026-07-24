@@ -59,7 +59,7 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert manifest["rooms"][0]["source_building_admin_id"] == "301"
     assert manifest["rooms"][0]["node_name"] == "301 001_Teaching Lab"
     assert manifest["rooms"][0]["navigation_anchor"] == [2.0, 0.0, 3.0]
-    assert manifest["portals"][0]["node_name"] == "302 100E1_Elevator_SetE1"
+    assert manifest["portals"][0]["node_name"] == "302 100E1_Elevator_Set302E1"
     assert manifest["external_doors"][0]["node_name"] == "MainDoor"
     assert manifest["external_doors"][0]["kind"] == "door"
     assert manifest["external_doors"][0]["anchor"] == [1.0, 0.0, 2.0]
@@ -67,7 +67,7 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert topology["building_id"] == "science"
     assert topology["validation"]["terminal_count"] == 2
     assert topology["terminals"][0]["portal_name"] == "MainDoor"
-    assert topology["terminals"][1]["portal_name"] == "302 100E1_Elevator_SetE1"
+    assert topology["terminals"][1]["portal_name"] == "302 100E1_Elevator_Set302E1"
     assert manifest["assets"]["portal_topology"] == "science_portal_topology.json"
     assert result["artifacts"]["portal_topology"] == str(export_dir / "science_portal_topology.json")
     assert manifest["nav"]["building_entries"][0]["node_name"] == "MainDoor"
@@ -85,7 +85,7 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert "navigation_mesh = SubResource" in scene_text
     assert "301 001_Teaching Lab" in scene_text
     assert '[node name="NavTarget" type="Node3D" parent="Floors/Floor0/Rooms/301 001_Teaching Lab"]' in scene_text
-    assert "302 100E1_Elevator_SetE1" in scene_text
+    assert "302 100E1_Elevator_Set302E1" in scene_text
     assert '[node name="MainDoor" type="Node3D" parent="Floors/Floor0/Rooms"]' in scene_text
     assert json.loads((export_dir / "external_doors.json").read_text(encoding="utf-8"))[0]["node_name"] == "MainDoor"
 
@@ -170,7 +170,7 @@ def test_generate_group_can_filter_to_one_member_and_one_floor_from_source(tmp_p
     assert 'building_name = "science"' in scene_text
     assert 'floor_name = "G"' in scene_text
     assert "301 001_Teaching Lab" in scene_text
-    assert "302 100E1_Elevator_SetE1" not in scene_text
+    assert "302 100E1_Elevator_Set302E1" not in scene_text
 
 
 def test_group_manifest_derives_unknown_vertical_links_for_godot(monkeypatch, tmp_path):
@@ -233,8 +233,8 @@ def test_group_manifest_derives_unknown_vertical_links_for_godot(monkeypatch, tm
         ("303-802", "303-8U02")
     ]
     assert route_links[0]["group_id"] == "MI_303_ELEV_001"
-    assert manifest["portals"][0]["node_name"] == "303 802_Elevator_SetMI_303_ELEV_001"
-    assert manifest["portals"][1]["node_name"] == "303 8U02_Elevator_SetMI_303_ELEV_001"
+    assert manifest["portals"][0]["node_name"] == "303 802_Elevator_Set303MI_303_ELEV_001"
+    assert manifest["portals"][1]["node_name"] == "303 8U02_Elevator_Set303MI_303_ELEV_001"
     assert manifest["nav"]["vertical_route_derivation"] == {
         "accepted": 1,
         "candidates": 1,
@@ -358,8 +358,8 @@ def test_group_node_names_are_globally_deduped_but_keep_portal_set_suffix():
             {"floor_index": 2, "node_name": "302 200C3_Unclassified Facilities", "source_id": "room2222"},
         ],
         "portals": [
-            {"floor_index": 1, "node_name": "302 100S2_Stairs_Set2", "source_id": "portal1111"},
-            {"floor_index": 2, "node_name": "302 100S2_Stairs_Set2", "source_id": "portal2222"},
+            {"floor_index": 1, "node_name": "302 100S2_Stairs_Set302S2", "source_id": "portal1111"},
+            {"floor_index": 2, "node_name": "302 100S2_Stairs_Set302S2", "source_id": "portal2222"},
         ],
         "nav": {
             "room_targets": [
@@ -377,10 +377,10 @@ def test_group_node_names_are_globally_deduped_but_keep_portal_set_suffix():
 
     assert manifest["rooms"][0]["node_name"] == "302 200C3_Unclassified Facilities"
     assert manifest["rooms"][1]["node_name"] == "302 200C3_Unclassified Facilities__room2222"
-    assert manifest["portals"][0]["node_name"] == "302 100S2_Stairs_Set2"
-    assert manifest["portals"][1]["node_name"] == "302 100S2_Stairs__portal22_Set2"
+    assert manifest["portals"][0]["node_name"] == "302 100S2_Stairs_Set302S2"
+    assert manifest["portals"][1]["node_name"] == "302 100S2_Stairs__portal22_Set302S2"
     assert manifest["nav"]["room_targets"][1]["node_name"] == "302 200C3_Unclassified Facilities__room2222"
-    assert manifest["nav"]["links"][0]["to_node_name"] == "302 100S2_Stairs__portal22_Set2"
+    assert manifest["nav"]["links"][0]["to_node_name"] == "302 100S2_Stairs__portal22_Set302S2"
 
 
 def test_route_navigation_meshes_follow_cached_route_corridors_not_floor_union(tmp_path):

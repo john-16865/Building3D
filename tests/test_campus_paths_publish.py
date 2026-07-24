@@ -35,9 +35,11 @@ def test_publish_copies_assets_and_writes_scripts(tmp_path):
         "check_campus_roads.gd",
         "apply_campus_roads.gd",
         "probe_campus_roads_nav.gd",
-        "probe_campus_optimal_line.gd",
     ):
         assert (godot_dir / "tools" / name).exists()
+    # The optimal-line probe was retired with CampusMain._precomputed_campus_waypoints;
+    # publish must not resurrect it.
+    assert not (godot_dir / "tools" / "probe_campus_optimal_line.gd").exists()
     # Source scene wires the GLB under a NavigationRegion3D of the roads node.
     source = (godot_dir / "Scene" / "campus_roads_source.tscn").read_text(encoding="utf-8")
     assert f'[node name="{cfg.roads_node_name}"' in source
@@ -67,12 +69,6 @@ def test_generated_scripts_contain_key_logic(tmp_path):
     probe = (tools / "probe_campus_roads_nav.gd").read_text(encoding="utf-8")
     assert "map_get_path" in probe
     assert "CAMPUS ROADS NAV OK" in probe
-
-    line_probe = (tools / "probe_campus_optimal_line.gd").read_text(encoding="utf-8")
-    # Reads shipped pairs and asserts each drawn line follows the optimal route.
-    assert "_precomputed_campus_waypoints" in line_probe
-    assert "campus_building_routes.json" in line_probe
-    assert "CAMPUS OPTIMAL LINE OK" in line_probe
 
 
 def test_publish_is_deterministic(tmp_path):

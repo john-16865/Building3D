@@ -9,7 +9,6 @@ from building3d.artifacts import artifact_names
 from building3d.batch import discover_inventory, generate_all
 from building3d.catalog import write_building_catalog
 from building3d.config import load_config, load_group_config, load_solution_config
-from building3d.debug_stages import export_group_debug_stages
 from building3d.export_package import package_export
 from building3d.geometry import MeshData, dataset_meshes, navigation_meshes_from_meshes, visual_meshes_from_meshes
 from building3d.gltf import write_glb
@@ -86,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     unimate_parser.add_argument("--sync-backend", action="store_true", help="Run the backend sync_mapsindoors command.")
     unimate_parser.add_argument("--backend-dir", default=None, help="UNIMATE backend directory containing manage.py.")
     unimate_parser.add_argument("--no-fetch", action="store_true", help="Fail if cached raw member data is missing.")
+    unimate_parser.add_argument(
+        "--no-campus-paths",
+        action="store_true",
+        help="Skip refreshing the campus road network (the new building will have no road spur until campus-paths runs).",
+    )
+    unimate_parser.add_argument("--campus-paths-config", default="configs/unimate_campus_paths.yaml")
     campus_paths_parser = subparsers.add_parser(
         "campus-paths",
         help="Generate CampusMain roads/paths from MapsIndoors and publish into Godot.",
@@ -100,7 +105,35 @@ def main(argv: list[str] | None = None) -> int:
     campus_paths_parser.add_argument("--no-probe", action="store_true", help="Skip the headless campus nav pathfinding probe.")
     campus_paths_parser.add_argument("--force-sample", action="store_true", help="Ignore the route cache and re-sample.")
     campus_paths_parser.add_argument("--max-targets", type=int, default=None, help="Cap building routing targets.")
+    campus_context_parser = subparsers.add_parser(
+        "campus-context",
+        help="Generate the all-campus building context GLB and publish it into CampusMain.",
+    )
+    campus_context_parser.add_argument("--config", default="configs/auckland.yaml")
+    campus_context_parser.add_argument("--paths-config", default="configs/unimate_campus_paths.yaml")
+    campus_context_parser.add_argument("--groups-config", default="configs/auckland_building_groups.yaml")
+    campus_context_parser.add_argument("--godot-dir", default=None, help="UNIMATE Godot project directory (required to publish).")
+    campus_context_parser.add_argument("--no-publish", action="store_true", help="Generate artifacts only; do not copy into Godot.")
     args = parser.parse_args(argv)
+    if args.command == "campus-context":
+        from building3d.campus_context import generate_campus_context, publish_campus_context_to_unimate
+        from building3d.campus_paths import load_campus_paths_config
+
+        solution_config = load_solution_config(args.config)
+        cfg = load_campus_paths_config(args.paths_config)
+        groups = load_group_config(args.groups_config)
+        stats = generate_campus_context(solution_config, cfg, groups)
+        print(
+            f"Campus context: {stats['buildings']} buildings, {stats['meshes']} meshes "
+            f"({stats['skipped_placed']} placed buildings skipped, {stats['skipped_geometry']} without geometry)"
+        )
+        if not args.no_publish:
+            if args.godot_dir is None:
+                print("  (no --godot-dir given; artifacts written to export dir only)")
+            else:
+                publish = publish_campus_context_to_unimate(stats["export_dir"], args.godot_dir)
+                print(f"  published -> {publish['campus_main']} (changed={publish['changed']})")
+        return 0
     if args.command == "campus-paths":
         from building3d.campus_paths import generate_campus_paths, load_campus_paths_config
         from building3d.unimate_publish import publish_campus_paths_to_unimate
@@ -156,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             sync_backend=args.sync_backend,
             backend_dir=args.backend_dir,
             fetch_missing=not args.no_fetch,
+            refresh_campus_paths=not args.no_campus_paths and not args.no_campus_placement,
+            campus_paths_config=args.campus_paths_config,
         )
         print(f"Published UNIMATE building '{result['group_id']}' from {result['export_dir']}")
         for step in result["steps"]:
@@ -182,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: {warning}")
         return 0
     if args.command == "debug-stages":
+        # debug_stages.py is not tracked in the repo; import lazily so the
+        # missing module only affects this command, not the whole CLI.
+        from building3d.debug_stages import export_group_debug_stages
+
         solution_config = load_solution_config(args.config)
         group_config = load_group_config(args.groups_config).get(args.group_id)
         result = export_group_debug_stages(

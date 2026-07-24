@@ -13,10 +13,10 @@ def test_portal_topology_uses_exact_terminals_and_component_walk_edges():
     topology = build_portal_topology(manifest, route_meshes, generated_at="2026-06-04T00:00:00Z")
 
     terminals = {terminal["id"]: terminal for terminal in topology["terminals"]}
-    lift_303_f10 = "science:F10:303:lift:MI_303_ELEV_001:303_802"
-    stair_303_f10 = "science:F10:303:stair:3:303_800S3"
-    lift_303_f11 = "science:F11:303:lift:MI_303_ELEV_001:303_8U02"
-    lift_302_f10 = "science:F10:302:lift:MI_302_ELEV_001:302_802"
+    lift_303_f10 = "science:F10:303:lift:303MI_303_ELEV_001:303_802"
+    stair_303_f10 = "science:F10:303:stair:303S3:303_800S3"
+    lift_303_f11 = "science:F11:303:lift:303MI_303_ELEV_001:303_8U02"
+    lift_302_f10 = "science:F10:302:lift:302MI_302_ELEV_001:302_802"
 
     assert terminals[lift_303_f10] == {
         "id": lift_303_f10,
@@ -24,9 +24,9 @@ def test_portal_topology_uses_exact_terminals_and_component_walk_edges():
         "floor_index": 10,
         "floor_number": 8,
         "section": "303",
-        "portal_name": "303 802_Elevator_SetMI_303_ELEV_001",
+        "portal_name": "303 802_Elevator_Set303MI_303_ELEV_001",
         "portal_type": "lift",
-        "group_id": "MI_303_ELEV_001",
+        "group_id": "303MI_303_ELEV_001",
         "position_local": [5.0, 33.6, 0.0],
     }
 
@@ -47,7 +47,7 @@ def test_portal_topology_uses_exact_terminals_and_component_walk_edges():
         for edge in topology["vertical_edges"]
     }
     assert vertical_edges[(lift_303_f10, lift_303_f11)]["mode"] == "lift"
-    assert vertical_edges[(lift_303_f10, lift_303_f11)]["group_id"] == "MI_303_ELEV_001"
+    assert vertical_edges[(lift_303_f10, lift_303_f11)]["group_id"] == "303MI_303_ELEV_001"
     assert vertical_edges[(lift_303_f10, lift_303_f11)]["cost"] == 20.0
     assert (lift_303_f11, lift_303_f10) in vertical_edges
     assert all("302" not in edge["to"] for edge in vertical_edges.values() if edge["from"] == lift_303_f10)
@@ -102,7 +102,7 @@ def test_portal_topology_can_reach_science_floor_11_mi_lift_from_floor_2():
 
     topology = build_portal_topology(manifest, route_meshes, generated_at="2026-06-04T00:00:00Z")
 
-    target = "science:F11:303:lift:MI_303_ELEV_001:303_8U02"
+    target = "science:F11:303:lift:303MI_303_ELEV_001:303_8U02"
     assert _is_reachable(topology, start_floor_index=2, target_terminal_id=target)
 
     bridge_edges = {
@@ -111,8 +111,8 @@ def test_portal_topology_can_reach_science_floor_11_mi_lift_from_floor_2():
         if edge.get("reason") == "adjacent_route_navmesh_components"
     }
     assert (
-        "science:F10:303:stair:3:303_800S3",
-        "science:F10:303:lift:MI_303_ELEV_001:303_802",
+        "science:F10:303:stair:303S3:303_800S3",
+        "science:F10:303:lift:303MI_303_ELEV_001:303_802",
     ) in bridge_edges
 
 
@@ -128,7 +128,7 @@ def _science_manifest():
             {
                 "external_id": "303-800S3",
                 "source_id": "feature-303-800S3",
-                "node_name": "303 800S3_Stairs_Set3",
+                "node_name": "303 800S3_Stairs_Set303S3",
                 "floor_index": 10,
                 "floor_name": "8",
                 "kind": "stair",
@@ -139,7 +139,7 @@ def _science_manifest():
             {
                 "external_id": "303-802",
                 "source_id": "feature-303-802",
-                "node_name": "303 802_Elevator_SetMI_303_ELEV_001",
+                "node_name": "303 802_Elevator_Set303MI_303_ELEV_001",
                 "floor_index": 10,
                 "floor_name": "8",
                 "kind": "elevator",
@@ -150,7 +150,7 @@ def _science_manifest():
             {
                 "external_id": "303-8U02",
                 "source_id": "feature-303-8U02",
-                "node_name": "303 8U02_Elevator_SetMI_303_ELEV_001",
+                "node_name": "303 8U02_Elevator_Set303MI_303_ELEV_001",
                 "floor_index": 11,
                 "floor_name": "M8",
                 "kind": "elevator",
@@ -161,7 +161,7 @@ def _science_manifest():
             {
                 "external_id": "302-802",
                 "source_id": "feature-302-802",
-                "node_name": "302 802_Elevator_SetMI_302_ELEV_001",
+                "node_name": "302 802_Elevator_Set302MI_302_ELEV_001",
                 "floor_index": 10,
                 "floor_name": "8",
                 "kind": "elevator",
@@ -181,8 +181,8 @@ def _science_manifest():
                     "to_source_id": "feature-303-8U02",
                     "from_external_id": "303-802",
                     "to_external_id": "303-8U02",
-                    "from_node_name": "303 802_Elevator_SetMI_303_ELEV_001",
-                    "to_node_name": "303 8U02_Elevator_SetMI_303_ELEV_001",
+                    "from_node_name": "303 802_Elevator_Set303MI_303_ELEV_001",
+                    "to_node_name": "303 8U02_Elevator_Set303MI_303_ELEV_001",
                     "from_floor_index": 10,
                     "to_floor_index": 11,
                     "from_anchor": [5.0, 33.6, 0.0],
@@ -208,7 +208,7 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
             {
                 "external_id": "303-G00S2",
                 "source_id": "feature-303-G00S2",
-                "node_name": "303 G00S2_Stairs_Set2",
+                "node_name": "303 G00S2_Stairs_Set303S2",
                 "floor_index": 2,
                 "floor_name": "G",
                 "kind": "stair",
@@ -219,7 +219,7 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
             {
                 "external_id": "303-700S2",
                 "source_id": "feature-303-700S2",
-                "node_name": "303 700S2_Stairs_Set2",
+                "node_name": "303 700S2_Stairs_Set303S2",
                 "floor_index": 9,
                 "floor_name": "7",
                 "kind": "stair",
@@ -230,7 +230,7 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
             {
                 "external_id": "303-700S3",
                 "source_id": "feature-303-700S3",
-                "node_name": "303 700S3_Stairs_Set3",
+                "node_name": "303 700S3_Stairs_Set303S3",
                 "floor_index": 9,
                 "floor_name": "7",
                 "kind": "stair",
@@ -241,7 +241,7 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
             {
                 "external_id": "303-800S3",
                 "source_id": "feature-303-800S3",
-                "node_name": "303 800S3_Stairs_Set3",
+                "node_name": "303 800S3_Stairs_Set303S3",
                 "floor_index": 10,
                 "floor_name": "8",
                 "kind": "stair",
@@ -252,7 +252,7 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
             {
                 "external_id": "303-802",
                 "source_id": "feature-303-802",
-                "node_name": "303 802_Elevator_SetMI_303_ELEV_001",
+                "node_name": "303 802_Elevator_Set303MI_303_ELEV_001",
                 "floor_index": 10,
                 "floor_name": "8",
                 "kind": "elevator",
@@ -263,7 +263,7 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
             {
                 "external_id": "303-8U02",
                 "source_id": "feature-303-8U02",
-                "node_name": "303 8U02_Elevator_SetMI_303_ELEV_001",
+                "node_name": "303 8U02_Elevator_Set303MI_303_ELEV_001",
                 "floor_index": 11,
                 "floor_name": "M8",
                 "kind": "elevator",
@@ -283,8 +283,8 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
                     "feature-303-700S2",
                     "303-G00S2",
                     "303-700S2",
-                    "303 G00S2_Stairs_Set2",
-                    "303 700S2_Stairs_Set2",
+                    "303 G00S2_Stairs_Set303S2",
+                    "303 700S2_Stairs_Set303S2",
                     2,
                     9,
                 ),
@@ -296,8 +296,8 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
                     "feature-303-800S3",
                     "303-700S3",
                     "303-800S3",
-                    "303 700S3_Stairs_Set3",
-                    "303 800S3_Stairs_Set3",
+                    "303 700S3_Stairs_Set303S3",
+                    "303 800S3_Stairs_Set303S3",
                     9,
                     10,
                 ),
@@ -309,8 +309,8 @@ def _science_manifest_with_floor_2_route_to_mi_lift():
                     "feature-303-8U02",
                     "303-802",
                     "303-8U02",
-                    "303 802_Elevator_SetMI_303_ELEV_001",
-                    "303 8U02_Elevator_SetMI_303_ELEV_001",
+                    "303 802_Elevator_Set303MI_303_ELEV_001",
+                    "303 8U02_Elevator_Set303MI_303_ELEV_001",
                     10,
                     11,
                 ),
