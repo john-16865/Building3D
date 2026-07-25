@@ -68,6 +68,11 @@ def test_generated_scripts_contain_key_logic(tmp_path):
 
     probe = (tools / "probe_campus_roads_nav.gd").read_text(encoding="utf-8")
     assert "map_get_path" in probe
+    assert "MAX_SCIENCE_ARTS_DETOUR_RATIO" in probe
+    assert "MAX_ANY_DETOUR_RATIO" in probe
+    assert "detour_ratio" in probe
+    assert "NavigationServer3D.free_rid(nav_rid)" in probe
+    assert "NavigationServer3D.free_rid(map)" in probe
     assert "CAMPUS ROADS NAV OK" in probe
 
 

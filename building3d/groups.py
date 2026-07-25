@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from shapely import constrained_delaunay_triangles
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import nearest_points, unary_union
 from shapely.strtree import STRtree
@@ -70,6 +71,7 @@ ROUTE_NAV_CUSTOM_CONNECTOR_RADIUS_MULTIPLIER = 1.5
 ROUTE_NAV_CUSTOM_CONNECTOR_PAD_MULTIPLIER = 2.0
 ROUTE_DEBUG_CENTERLINE_WIDTH = 0.2
 ROUTE_CACHE_ENDPOINT_SCOPE_TOLERANCE = 3.0
+EXTERNAL_DOOR_NAVIGATION_ANCHOR_MAX_DISTANCE = 30.0
 
 
 def generate_group(
@@ -126,6 +128,20 @@ def generate_group(
         manifest = _build_group_manifest(projected, group, member_records, processed_dir, export_dir, wall_blockers_by_floor=wall_blockers_by_floor)
         clip_footprints = _route_clip_footprints_by_floor(meshes, manifest.get("floors", []))
         route_endpoint_scope = _route_endpoint_scope_records(manifest)
+    base_navigation_meshes = _scene_navigation_meshes_with_floor_fallback(
+        [],
+        meshes,
+        manifest.get("floors", []),
+    )
+    _assign_external_door_navigation_anchors(manifest, base_navigation_meshes)
+    _sync_external_door_navigation_links(manifest)
+    _sync_nav_node_names(manifest)
+    # _build_group_manifest creates walk links before geometry is available.
+    # Run the idempotent linker once more now that external doors have an
+    # indoor navigation anchor; otherwise a street-side physical marker can
+    # remain isolated from every lift/stair even though the building is
+    # routable in MapsIndoors.
+    _add_same_floor_walk_links(manifest, wall_blockers_by_floor=wall_blockers_by_floor)
     floor_visual_files = _write_floor_visual_glbs(meshes, manifest.get("floors", []), export_dir, group.id)
     route_navigation_meshes, route_nav_stats = _complete_route_navigation_meshes(
         export_dir / "door_route_cache",
@@ -162,9 +178,16 @@ def generate_group(
         meshes,
         manifest.get("floors", []),
     )
-    if route_nav_stats:
-        route_nav_stats["route_wall_openings"] = _route_wall_opening_stats(route_wall_openings)
-        manifest.setdefault("nav", {})["validation"] = route_nav_stats
+    external_door_nav_stats = _assign_external_door_navigation_anchors(
+        manifest,
+        scene_navigation_meshes,
+    )
+    _sync_external_door_navigation_links(manifest)
+    _sync_nav_node_names(manifest)
+    route_nav_stats = dict(route_nav_stats)
+    route_nav_stats["route_wall_openings"] = _route_wall_opening_stats(route_wall_openings)
+    route_nav_stats["external_door_navigation"] = external_door_nav_stats
+    manifest.setdefault("nav", {})["validation"] = route_nav_stats
     portal_topology_file = f"{group.id}_portal_topology.json"
     manifest["assets"] = {
         "visual_glb": names.visual_glb,
@@ -209,6 +232,7 @@ def generate_group(
         manifest,
         scene_navigation_meshes,
     )
+    _assert_external_door_topology_health(portal_topology)
     floor_visual_paths = {
         floor_index: f"{_unimate_asset_base(group)}/{filename}"
         for floor_index, filename in floor_visual_files.items()
@@ -425,6 +449,26 @@ def _canonical_floor_name(value: str) -> str:
     return clean
 
 
+def _is_basement_floor_name(value: str) -> bool:
+    """Is this floor below ground?
+
+    Basements are spelled two ways in this dataset: 'B1'/'B-1' in most
+    buildings, but plain negative numbers in others -- music's floors are
+    '-1', '1', 'M1', '2' and recreation's start '-2', '-1', 'G'. Recognising
+    only the 'B' form made the ground-floor fallback in
+    _normalise_external_door resolve music's street entrance onto its
+    BASEMENT, and that floor holds no stair or lift, so every room in the
+    building became unroutable.
+    """
+    clean = str(value).strip().upper()
+    if clean.startswith("B"):
+        return True
+    try:
+        return float(clean) < 0
+    except ValueError:
+        return False
+
+
 def _floor_sort_key(value: str) -> tuple[float, str]:
     clean = _canonical_floor_name(value)
     if clean.startswith("B-"):
@@ -502,7 +546,9 @@ def _build_group_manifest(
         }
         for record in records
     ]
-    external_doors = _load_external_doors(processed_dir, export_dir, group, manifest.get("floors", []))
+    external_doors = _load_external_doors(
+        processed_dir, export_dir, group, manifest.get("floors", []), manifest.get("rooms", [])
+    )
     if external_doors:
         manifest["external_doors"] = external_doors
     _apply_room_navigation_anchors(manifest, processed_dir, export_dir, group)
@@ -1374,7 +1420,16 @@ def _route_grid_cell_blocked_by_wall(
         if bypass_area >= cell.area * 0.2:
             return False
     for blocker in _query_wall_blockers(wall_blocker_index, cell):
-        if cell.intersects(blocker):
+        # `intersects` is true for ZERO-AREA contact, so a cell was discarded
+        # when it merely touched a wall at a point. Walls carry door openings by
+        # this stage, but an opening is bounded by its two jambs, and every grid
+        # cell filling a doorway touches a jamb endpoint - so both door cells
+        # were vetoed and the doorway vanished, severing the corridor by exactly
+        # one cell. That is why baked island-to-island gaps spiked at exactly
+        # 0.5 m. Walls were already subtracted from the corridor with a 0.15
+        # clearance in _subtract_route_wall_blockers, so only a wall that truly
+        # runs THROUGH the cell should veto it.
+        if cell.intersection(blocker).length > ROUTE_NAV_WALL_INTERSECTION_TOLERANCE:
             return True
     return False
 
@@ -1414,7 +1469,15 @@ def _route_polygon_to_mesh(
     wall_blocker_index: tuple[Any, list[LineString]] | None = None,
     wall_bypass_geometry: Any | None = None,
 ) -> MeshData:
-    """Convert a route corridor polygon into edge-connected grid cells."""
+    """Rasterize wall-safe coverage, then dissolve and triangulate its cells.
+
+    The occupancy grid remains the authority for wall filtering and narrow
+    connector survival. Exporting every accepted cell as a Godot polygon,
+    however, makes the funnel algorithm alternate across thousands of tiny
+    edges. Dissolving those cells and constrained-triangulating each resulting
+    component preserves the exact coverage, holes, and shared connectivity
+    while removing the internal grid boundaries that caused zigzag paths.
+    """
     suffix = "" if index == 1 else f"__part_{index}"
     vertices: list[list[float]] = []
     vertex_index_by_key: dict[tuple[float, float, float], int] = {}
@@ -1443,6 +1506,7 @@ def _route_polygon_to_mesh(
             vertices.append([key[0], key[1], key[2]])
         return vertex_index_by_key[key]
 
+    selected_cells: list[Polygon] = []
     for z_index in range(z_count):
         z0 = start_z + z_index * cell_size
         z1 = z0 + cell_size
@@ -1461,11 +1525,46 @@ def _route_polygon_to_mesh(
             cell_z1 = min(z1, max_z)
             if cell_x1 - cell_x0 <= 0.001 or cell_z1 - cell_z0 <= 0.001:
                 continue
-            top_left = vertex_index(cell_x0, cell_z0)
-            top_right = vertex_index(cell_x1, cell_z0)
-            bottom_left = vertex_index(cell_x0, cell_z1)
-            bottom_right = vertex_index(cell_x1, cell_z1)
-            faces.append([top_left, top_right, bottom_right, bottom_left])
+            selected_cells.append(box(cell_x0, cell_z0, cell_x1, cell_z1))
+
+    if selected_cells:
+        dissolved_cells = unary_union(selected_cells).buffer(0)
+        # This tolerance removes only redundant collinear grid vertices. It is
+        # three orders of magnitude below one source cell and cannot bridge a
+        # wall gap or erase a meaningful corridor feature.
+        boundary_tolerance = cell_size * 0.001
+        for component in _iter_route_polygons(dissolved_cells):
+            clean_component = component.simplify(
+                boundary_tolerance,
+                preserve_topology=True,
+            )
+            triangles = constrained_delaunay_triangles(clean_component)
+            for triangle in getattr(triangles, "geoms", []):
+                if not isinstance(triangle, Polygon) or triangle.area < ROUTE_NAV_TRIANGLE_MIN_AREA:
+                    continue
+                if not clean_component.covers(triangle):
+                    continue
+                coordinates = list(triangle.exterior.coords)[:-1]
+                if len(coordinates) != 3:
+                    continue
+                faces.append(
+                    [
+                        vertex_index(float(x), float(z))
+                        for x, z in coordinates
+                    ]
+                )
+
+    # Defensive compatibility fallback for an unexpected GEOS triangulation
+    # failure. The old cell mesh is noisy but remains connected and walkable.
+    if selected_cells and not faces:
+        for cell in selected_cells:
+            coordinates = list(cell.exterior.coords)[:-1]
+            faces.append(
+                [
+                    vertex_index(float(x), float(z))
+                    for x, z in coordinates
+                ]
+            )
 
     if faces:
         return MeshData(
@@ -1473,7 +1572,11 @@ def _route_polygon_to_mesh(
             vertices=vertices,
             faces=faces,
             material="floor",
-            metadata={"godot_nav_overlay": "route_corridor_grid"},
+            metadata={
+                "godot_nav_overlay": "route_corridor_grid",
+                "route_nav_meshing": "constrained_delaunay",
+                "source_grid_cells": len(selected_cells),
+            },
         )
 
     return MeshData(
@@ -1560,25 +1663,88 @@ def _bridge_route_components(geometry: Any, corridor_radius: float) -> Any:
     return merged
 
 
+EXTERNAL_DOOR_MAX_DISTANCE_FROM_BUILDING = 60.0
+# Two sources describing the same doorway within this distance are one door.
+EXTERNAL_DOOR_DEDUPE_DISTANCE = 3.0
+
+
+def _external_door_anchor_is_plausible(
+    anchor: Any,
+    rooms: list[dict[str, Any]],
+    max_distance: float = EXTERNAL_DOOR_MAX_DISTANCE_FROM_BUILDING,
+) -> bool:
+    """Is this anchor anywhere near the building it claims to be a door of?
+
+    Route-derived entry points are harvested from routes that run BETWEEN
+    buildings, so a waypoint far away gets recorded as this building's
+    entrance. In the published campus that is 155 of 266 door records, the
+    worst 957 m out. They stay inert while a building also has a real door,
+    but music and conference ended up with nothing else and became unroutable.
+
+    Measured against the bounding box of the building's own rooms, with a
+    generous margin so a genuine street-side entrance -- which legitimately
+    sits outside the footprint -- is kept.
+    """
+    if not _valid_local_anchor(anchor) or not rooms:
+        return True
+    xs, zs = [], []
+    for room in rooms:
+        position = room.get("position") or room.get("local") or room.get("anchor")
+        if _valid_local_anchor(position):
+            xs.append(float(position[0]))
+            zs.append(float(position[2]))
+    if not xs:
+        return True
+    x = float(anchor[0])
+    z = float(anchor[2])
+    dx = max(min(xs) - x, 0.0, x - max(xs))
+    dz = max(min(zs) - z, 0.0, z - max(zs))
+    return math.hypot(dx, dz) <= max_distance
+
+
 def _load_external_doors(
     processed_dir: Path,
     export_dir: Path,
     group: BuildingGroupConfig,
     floors: list[dict[str, Any]],
+    rooms: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    # MERGE the sources rather than taking the first that exists. The authored
+    # file is usually a single `manual_bbox_nearest_road_node` point that
+    # guarantees a campus-road connection; the route-derived entries are the
+    # building's actual doors. Letting the authored file win outright discarded
+    # the real doors, and regions that only those doors reached lost their entry
+    # (old_government_house dropped from 9 usable doors to 1, taking its
+    # reachable room count down with it). Authored entries come first so they
+    # keep priority when two sources describe the same doorway.
     candidates = [
         processed_dir / "external_doors.json",
         export_dir / "external_doors.json",
         export_dir / f"{group.id}_external_entry_points_route_derived.json",
     ]
-    source_path = next((path for path in candidates if path.exists()), None)
-    if source_path is None:
-        return []
-    try:
-        raw = json.loads(source_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(raw, list):
+    raw: list[Any] = []
+    seen_positions: list[tuple[float, float]] = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            anchor = item.get("anchor") or item.get("local") or item.get("door_local")
+            if _valid_local_anchor(anchor):
+                x, z = float(anchor[0]), float(anchor[2])
+                if any(math.hypot(x - px, z - pz) <= EXTERNAL_DOOR_DEDUPE_DISTANCE
+                       for px, pz in seen_positions):
+                    continue
+                seen_positions.append((x, z))
+            raw.append(item)
+    if not raw:
         return []
 
     floor_index_by_name = {
@@ -1586,12 +1752,19 @@ def _load_external_doors(
         for floor in floors
     }
     records = []
+    dropped = 0
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
+            continue
+        anchor = item.get("anchor") or item.get("local") or item.get("door_local")
+        if not _external_door_anchor_is_plausible(anchor, rooms or []):
+            dropped += 1
             continue
         normalized = _normalise_external_door(item, index, group, floor_index_by_name)
         if normalized:
             records.append(normalized)
+    if dropped:
+        print(f"  external doors: dropped {dropped} entry point(s) too far from {group.id}")
     records.sort(key=lambda item: (int(item.get("floor_index", 0)), str(item.get("external_id", ""))))
     return records
 
@@ -1622,7 +1795,7 @@ def _normalise_external_door(
         ground_candidates = {
             name: index
             for name, index in floor_index_by_name.items()
-            if not name.startswith("B")
+            if not _is_basement_floor_name(name)
         } or floor_index_by_name
         if not ground_candidates:
             return None
@@ -1832,7 +2005,11 @@ def _route_navigation_point_records(manifest: dict[str, Any]) -> list[dict[str, 
         for record in manifest.get(key, []):
             if not isinstance(record, dict):
                 continue
-            anchor = record.get("anchor")
+            anchor = (
+                record.get("navigation_anchor")
+                if key == "external_doors" and _valid_local_anchor(record.get("navigation_anchor"))
+                else record.get("anchor")
+            )
             if _valid_local_anchor(anchor):
                 records.append(
                     {
@@ -2139,15 +2316,364 @@ def _scene_navigation_meshes_with_floor_fallback(
     same-floor transfer proof stays route-only (a whole-slab fallback would
     fabricate walkable bridges between physically separate wings).
     """
+    # Keep this list identical to the NavigationMesh resources emitted by
+    # building3d.unimate: floor surfaces are authoritative. Including walls,
+    # room prisms, or tiny portal marker meshes here made portal-topology
+    # validation prove connectivity on geometry that Godot never shipped.
+    geometry_floor_meshes = [
+        mesh
+        for mesh in geometry_meshes
+        if mesh.material == "floor"
+    ]
     if not route_meshes:
-        return geometry_meshes
+        return geometry_floor_meshes
     covered_floor_names = {_floor_name_from_route_nav_mesh(mesh.name) for mesh in route_meshes}
     fallback = [
         mesh
-        for mesh in geometry_meshes
+        for mesh in geometry_floor_meshes
         if _canonical_floor_name(mesh_floor_name(mesh.name)) not in covered_floor_names
     ]
     return route_meshes + fallback
+
+
+def _assign_external_door_navigation_anchors(
+    manifest: dict[str, Any],
+    navigation_meshes: list[MeshData],
+    *,
+    max_distance: float = EXTERNAL_DOOR_NAVIGATION_ANCHOR_MAX_DISTANCE,
+) -> dict[str, Any]:
+    """Attach physical campus doors to a routable indoor navmesh component.
+
+    A manually researched street/courtyard marker is intentionally a physical
+    point, not proof that the polygon directly below it belongs to the indoor
+    route network. Kenneth Myers exposed the failure mode: its MainDoor landed
+    on a seven-polygon exterior slab while every room, lift, and stair lived on
+    the adjacent interior component. MapsIndoors correctly routed to Level 3,
+    but the generated topology started from the isolated slab and blamed the
+    room.
+
+    Preserve ``anchor`` as the official campus point and write
+    ``navigation_anchor`` on the nearest component containing a vertical
+    connector (or, for one-floor buildings, rooms). Both the topology and the
+    Godot scene consume the navigation anchor; provenance remains available in
+    the manifest and scene metadata.
+    """
+    doors = [
+        record
+        for record in manifest.get("external_doors", [])
+        if isinstance(record, dict) and _valid_local_anchor(record.get("anchor"))
+    ]
+    diagnostics: dict[str, Any] = {
+        "door_count": len(doors),
+        "relocated_count": 0,
+        "unchanged_count": 0,
+        "failed_count": 0,
+        "max_allowed_distance": float(max_distance),
+        "records": [],
+        "ok": True,
+    }
+    if not doors:
+        return diagnostics
+
+    components_by_floor = _navigation_components_by_floor(
+        navigation_meshes,
+        manifest.get("floors", []),
+    )
+    vertical_records_by_floor: dict[int, list[dict[str, Any]]] = {}
+    for portal in manifest.get("portals", []):
+        if not isinstance(portal, dict):
+            continue
+        if str(portal.get("kind", "")).lower() not in {"stair", "elevator"}:
+            continue
+        if not _valid_local_anchor(portal.get("anchor")):
+            continue
+        vertical_records_by_floor.setdefault(int(portal.get("floor_index", 0)), []).append(portal)
+
+    room_records_by_floor: dict[int, list[dict[str, Any]]] = {}
+    for room in manifest.get("rooms", []):
+        if not isinstance(room, dict):
+            continue
+        anchor = room.get("navigation_anchor") or room.get("anchor")
+        if not _valid_local_anchor(anchor):
+            continue
+        room_records_by_floor.setdefault(int(room.get("floor_index", 0)), []).append(room)
+
+    for door in doors:
+        floor_index = int(door.get("floor_index", 0))
+        components = components_by_floor.get(floor_index, [])
+        source_anchor = door["anchor"]
+        source_point = Point(float(source_anchor[0]), float(source_anchor[2]))
+        record_diagnostic: dict[str, Any] = {
+            "external_id": str(door.get("external_id") or door.get("entry_id") or ""),
+            "node_name": str(door.get("node_name") or ""),
+            "floor_index": floor_index,
+            "source_anchor": [float(source_anchor[0]), float(source_anchor[1]), float(source_anchor[2])],
+            "component_count": len(components),
+            "ok": False,
+        }
+        if not components:
+            record_diagnostic["reason"] = "floor_has_no_navigation_components"
+            diagnostics["failed_count"] += 1
+            diagnostics["ok"] = False
+            diagnostics["records"].append(record_diagnostic)
+            continue
+
+        vertical_counts = _component_reference_counts(
+            components,
+            [
+                portal.get("anchor")
+                for portal in vertical_records_by_floor.get(floor_index, [])
+            ],
+        )
+        room_counts = _component_reference_counts(
+            components,
+            [
+                room.get("navigation_anchor") or room.get("anchor")
+                for room in room_records_by_floor.get(floor_index, [])
+            ],
+        )
+        source_component_index = _nearest_navigation_component_index(source_point, components)
+
+        if any(count > 0 for count in vertical_counts):
+            candidate_indexes = [
+                index for index, count in enumerate(vertical_counts) if count > 0
+            ]
+            selection_reason = "vertical_network_component"
+        elif any(count > 0 for count in room_counts):
+            candidate_indexes = [
+                index for index, count in enumerate(room_counts) if count > 0
+            ]
+            selection_reason = "room_network_component"
+        else:
+            candidate_indexes = list(range(len(components)))
+            selection_reason = "largest_navigation_component"
+
+        target_component_index = min(
+            candidate_indexes,
+            key=lambda index: (
+                source_point.distance(components[index]),
+                -vertical_counts[index],
+                -room_counts[index],
+                -components[index].area,
+                index,
+            ),
+        )
+        target_component = components[target_component_index]
+        target_point = (
+            source_point
+            if target_component.covers(source_point)
+            else nearest_points(source_point, target_component)[1]
+        )
+        correction_distance = float(source_point.distance(target_point))
+        navigation_anchor = [
+            round(float(target_point.x), 6),
+            float(source_anchor[1]),
+            round(float(target_point.y), 6),
+        ]
+
+        record_diagnostic.update(
+            {
+                "source_component_index": source_component_index,
+                "target_component_index": target_component_index,
+                "target_vertical_count": vertical_counts[target_component_index],
+                "target_room_count": room_counts[target_component_index],
+                "selection_reason": selection_reason,
+                "navigation_anchor": navigation_anchor,
+                "correction_distance": round(correction_distance, 6),
+                "component_changed": (
+                    source_component_index is not None
+                    and source_component_index != target_component_index
+                ),
+            }
+        )
+        if correction_distance > max_distance:
+            record_diagnostic["reason"] = "navigation_component_too_far"
+            diagnostics["failed_count"] += 1
+            diagnostics["ok"] = False
+            diagnostics["records"].append(record_diagnostic)
+            continue
+
+        door["navigation_anchor"] = navigation_anchor
+        door["navigation_anchor_source"] = "connected_navigation_component"
+        door["navigation_anchor_confidence"] = "high"
+        door["navigation_anchor_distance"] = round(correction_distance, 6)
+        door["navigation_anchor_component_reason"] = selection_reason
+        door["navigation_anchor_component_index"] = target_component_index
+        door["navigation_anchor_source_component_index"] = source_component_index
+        door["navigation_anchor_relocated"] = correction_distance > 0.05
+        record_diagnostic["ok"] = True
+        record_diagnostic["reason"] = (
+            "relocated_to_routable_component"
+            if correction_distance > 0.05
+            else "already_on_routable_component"
+        )
+        if correction_distance > 0.05:
+            diagnostics["relocated_count"] += 1
+        else:
+            diagnostics["unchanged_count"] += 1
+        diagnostics["records"].append(record_diagnostic)
+
+    if not diagnostics["ok"]:
+        failures = [
+            "%s:%s" % (
+                record.get("external_id") or record.get("node_name") or "door",
+                record.get("reason", "unknown"),
+            )
+            for record in diagnostics["records"]
+            if not bool(record.get("ok", False))
+        ]
+        # Drop the unusable entries rather than aborting the build. External
+        # doors are merged from several sources, so one bad route-derived
+        # point should not take the whole building down -- that is what made
+        # `group art` and `group music` unrunnable. The guarantee worth keeping
+        # is that SOME entrance survives; without one the building really is
+        # unpublishable, so that case still raises.
+        failed_ids = {
+            str(record.get("external_id") or "")
+            for record in diagnostics["records"]
+            if not bool(record.get("ok", False))
+        }
+        survivors = [
+            record
+            for record in manifest.get("external_doors", [])
+            if not (isinstance(record, dict)
+                    and str(record.get("external_id") or "") in failed_ids)
+        ]
+        if not survivors:
+            raise ValueError(
+                "External entrance navigation-anchor validation failed for every "
+                "door: %s" % ", ".join(failures)
+            )
+        manifest["external_doors"] = survivors
+        diagnostics["dropped"] = sorted(failed_ids)
+        diagnostics["ok"] = True
+        print(
+            f"  external doors: dropped {len(failed_ids)} unusable entrance(s): "
+            + ", ".join(failures)
+        )
+    return diagnostics
+
+
+def _navigation_components_by_floor(
+    navigation_meshes: list[MeshData],
+    floors: list[dict[str, Any]],
+) -> dict[int, list[Polygon]]:
+    floor_index_by_name = {
+        _canonical_floor_name(str(floor.get("floor_name", ""))): int(floor.get("floor_index", 0))
+        for floor in floors
+        if isinstance(floor, dict)
+    }
+    polygons_by_floor: dict[int, list[Polygon]] = {}
+    for mesh in navigation_meshes:
+        if mesh.material != "floor":
+            continue
+        floor_name = _canonical_floor_name(mesh_floor_name(mesh.name))
+        if floor_name not in floor_index_by_name:
+            continue
+        floor_index = floor_index_by_name[floor_name]
+        for face in mesh.faces:
+            coordinates = []
+            for vertex_index in face:
+                if not (0 <= int(vertex_index) < len(mesh.vertices)):
+                    continue
+                vertex = mesh.vertices[int(vertex_index)]
+                if len(vertex) >= 3:
+                    coordinates.append((float(vertex[0]), float(vertex[2])))
+            if len(coordinates) < 3:
+                continue
+            polygon = Polygon(coordinates).buffer(0)
+            if polygon.is_empty or polygon.area <= 0.0001:
+                continue
+            polygons_by_floor.setdefault(floor_index, []).extend(
+                _iter_route_polygons(polygon)
+            )
+
+    components_by_floor: dict[int, list[Polygon]] = {}
+    for floor_index, polygons in polygons_by_floor.items():
+        merged = unary_union(polygons).buffer(0)
+        components_by_floor[floor_index] = _iter_route_polygons(merged)
+    return components_by_floor
+
+
+def _component_reference_counts(
+    components: list[Polygon],
+    anchors: list[Any],
+) -> list[int]:
+    counts = [0 for _component in components]
+    for anchor in anchors:
+        if not _valid_local_anchor(anchor):
+            continue
+        point = Point(float(anchor[0]), float(anchor[2]))
+        component_index = _nearest_navigation_component_index(point, components)
+        if component_index is not None:
+            counts[component_index] += 1
+    return counts
+
+
+def _nearest_navigation_component_index(
+    point: Point,
+    components: list[Polygon],
+) -> int | None:
+    for index, component in enumerate(components):
+        if component.covers(point):
+            return index
+    if not components:
+        return None
+    return min(
+        range(len(components)),
+        key=lambda index: (point.distance(components[index]), index),
+    )
+
+
+def _sync_external_door_navigation_links(manifest: dict[str, Any]) -> None:
+    doors_by_key: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for door in manifest.get("external_doors", []):
+        if not isinstance(door, dict) or not _valid_local_anchor(door.get("navigation_anchor")):
+            continue
+        floor_index = int(door.get("floor_index", 0))
+        for key_name, value in (
+            ("source_id", door.get("source_id")),
+            ("external_id", door.get("external_id") or door.get("entry_id")),
+            ("node_name", door.get("node_name")),
+        ):
+            if value:
+                doors_by_key[(key_name, str(value), floor_index)] = door
+
+    links = manifest.get("nav", {}).get("links", [])
+    if not isinstance(links, list):
+        return
+    for link in links:
+        if not isinstance(link, dict) or str(link.get("kind", "")) != "walk":
+            continue
+        for side in ("from", "to"):
+            floor_index = int(link.get(f"{side}_floor_index", -999))
+            matched = None
+            for key_name in ("source_id", "external_id", "node_name"):
+                value = link.get(f"{side}_{key_name}")
+                if value and (key_name, str(value), floor_index) in doors_by_key:
+                    matched = doors_by_key[(key_name, str(value), floor_index)]
+                    break
+            if matched is not None:
+                link[f"{side}_anchor"] = matched["navigation_anchor"]
+
+
+def _assert_external_door_topology_health(topology: dict[str, Any]) -> None:
+    validation = topology.get("validation", {})
+    if not isinstance(validation, dict):
+        return
+    external_door_count = int(validation.get("external_door_terminal_count", 0))
+    vertical_edge_count = int(validation.get("vertical_edge_count", 0))
+    routable_count = int(validation.get("routable_external_door_count", 0))
+    if external_door_count > 0 and vertical_edge_count > 0 and routable_count == 0:
+        unreachable = ", ".join(
+            str(value)
+            for value in validation.get("unreachable_external_door_ids", [])
+        )
+        raise ValueError(
+            "Portal topology has no external entrance connected to its vertical "
+            "network. Refusing to publish a topology that would mislabel rooms "
+            "as inaccessible. Isolated entrances: %s" % (unreachable or "unknown")
+        )
 
 
 def _required_navigation_floor_names(manifest: dict[str, Any]) -> set[str]:
@@ -2228,6 +2754,9 @@ def _sync_nav_node_names(manifest: dict[str, Any]) -> None:
             "floor_index": door.get("floor_index", 0),
             "floor_name": door.get("floor_name", ""),
             "anchor": door.get("anchor"),
+            "navigation_anchor": door.get("navigation_anchor", door.get("anchor")),
+            "navigation_anchor_source": door.get("navigation_anchor_source", ""),
+            "navigation_anchor_distance": door.get("navigation_anchor_distance", 0.0),
             "kind": "door",
             "bidirectional": True,
             "confidence": door.get("confidence", ""),

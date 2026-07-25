@@ -157,6 +157,24 @@ def _multistep_route(steps):
     }
 
 
+def _step(abutters, points, highway="footway"):
+    return {
+        "abutters": abutters,
+        "highway": highway,
+        "geometry": [
+            {"lng": p[0], "lat": p[1], "zLevel": 0.0, "floor_name": "0"}
+            for p in points
+        ],
+    }
+
+
+def _route_with_legs(legs):
+    return {
+        "status": "OK",
+        "routes": [{"legs": [{"steps": steps} for steps in legs]}],
+    }
+
+
 def test_extract_bridges_indoor_gap_within_a_leg():
     # One leg: outdoor -> indoor -> outdoor. The indoor stretch must not just be
     # dropped (that shatters the route); it becomes one connector spanning it.
@@ -170,6 +188,25 @@ def test_extract_bridges_indoor_gap_within_a_leg():
     assert highways.count("connector") == 1
     conn = segments[highways.index("connector")]
     assert conn == ((0.001, 0.0), (0.002, 0.0))  # spans exactly the indoor step
+
+
+def test_extract_bridges_indoor_gap_across_route_legs():
+    # MapsIndoors normally splits an outdoor -> indoor -> outdoor route into
+    # separate legs.  Continuity must survive those leg boundaries or the
+    # indoor public passage disappears from the generated navigation graph.
+    route = _route_with_legs(
+        [
+            [_step("OutsideOnVenue", [(0.0, 0.0), (0.001, 0.0)])],
+            [_step("InsideBuilding", [(0.001, 0.0), (0.002, 0.0)])],
+            [_step("OutsideOnVenue", [(0.002, 0.0), (0.003, 0.0)])],
+        ]
+    )
+
+    segments, highways = extract_outdoor_segments([route])
+
+    assert highways.count("connector") == 1
+    conn = segments[highways.index("connector")]
+    assert conn == ((0.001, 0.0), (0.002, 0.0))
 
 
 def test_extract_drops_trailing_indoor_stretch_without_connector():

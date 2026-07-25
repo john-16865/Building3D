@@ -1,4 +1,7 @@
-from tools.derive_science_door_points import _derive_one_room_door
+from tools.derive_science_door_points import (
+    _derive_one_room_door,
+    _outside_to_inside_points,
+)
 from building3d.projection import LocalProjector
 
 
@@ -90,3 +93,43 @@ def test_science_corridor_305_400c1_uses_route_endpoint_for_303s_400e4_override(
     assert row["door_lon"] == 0.9
     assert row["door_lat"] == 0.5
     assert row["distance_door_to_route_end_m"] == 0.0
+
+
+def _route_step(abutters, lon):
+    return {
+        "abutters": abutters,
+        "start_location": {
+            "lng": lon,
+            "lat": -36.85,
+            "zLevel": 0.0,
+            "floor_name": "0",
+        },
+    }
+
+
+def test_external_entry_uses_only_final_destination_building_transition():
+    route = {
+        "legs": [
+            {"steps": [_route_step("OutsideOnVenue", 174.70)]},
+            {"steps": [_route_step("InsideBuilding", 174.71)]},
+            {"steps": [_route_step("OutsideOnVenue", 174.72)]},
+            {"steps": [_route_step("InsideBuilding", 174.73)]},
+        ]
+    }
+
+    points = _outside_to_inside_points(route)
+
+    assert len(points) == 1
+    assert points[0].lon == 174.73
+
+
+def test_external_entry_rejects_intermediate_building_when_route_finishes_outside():
+    route = {
+        "legs": [
+            {"steps": [_route_step("OutsideOnVenue", 174.70)]},
+            {"steps": [_route_step("InsideBuilding", 174.71)]},
+            {"steps": [_route_step("OutsideOnVenue", 174.72)]},
+        ]
+    }
+
+    assert _outside_to_inside_points(route) == []

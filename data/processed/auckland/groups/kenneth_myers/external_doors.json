@@ -25,6 +25,18 @@
     "lat": -36.8466021,
     "logical_building_id": "kenneth_myers",
     "lon": 174.76946175,
+    "navigation_anchor": [
+      11.0,
+      0.0,
+      12.0
+    ],
+    "navigation_anchor_component_index": 0,
+    "navigation_anchor_component_reason": "vertical_network_component",
+    "navigation_anchor_confidence": "high",
+    "navigation_anchor_distance": 3.34129,
+    "navigation_anchor_relocated": true,
+    "navigation_anchor_source": "connected_navigation_component",
+    "navigation_anchor_source_component_index": 3,
     "node_name": "MainDoor",
     "source": "manual_street_frontage_shortland_st",
     "source_building_admin_id": "820",

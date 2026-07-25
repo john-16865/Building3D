@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "PyYAML>=6.0",
   "requests>=2.31",
-  "Shapely>=2.0",
+  "Shapely>=2.1",
 ]
 
 [project.optional-dependencies]

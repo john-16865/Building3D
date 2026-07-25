@@ -1123,6 +1123,10 @@ const CAMPUS_SCENE := "{cfg.campus_scene}"
 const BUILDINGS_PARENT := "{cfg.buildings_parent}"
 const ROADS_PATH := "{cfg.subviewport_parent}/{cfg.roads_node_name}"
 const MAX_SNAP := {cfg.entrance_spur_max_m + 20.0}
+const SCIENCE_NODE := "Science"
+const ARTS_EDUCATION_NODE := "ArtsEducation"
+const MAX_SCIENCE_ARTS_DETOUR_RATIO := 2.0
+const MAX_ANY_DETOUR_RATIO := 3.0
 
 
 func _init() -> void:
@@ -1191,15 +1195,38 @@ func _run() -> void:
 \t\t\tvar snap_b := to.distance_to(b)
 \t\t\tvar path := NavigationServer3D.map_get_path(map, from, to, true)
 \t\t\tvar span := 0.0
+\t\t\tvar path_length := 0.0
 \t\t\tif path.size() >= 2:
 \t\t\t\tspan = path[0].distance_to(path[path.size() - 1])
+\t\t\t\tpath_length = _path_length(path)
+\t\t\tvar direct := Vector2(from.x, from.z).distance_to(Vector2(to.x, to.z))
+\t\t\tvar detour_ratio := path_length / direct if direct > 0.001 else INF
+\t\t\tvar is_science_arts: bool = (
+\t\t\t\t(names[i] == SCIENCE_NODE and names[j] == ARTS_EDUCATION_NODE)
+\t\t\t\tor (names[i] == ARTS_EDUCATION_NODE and names[j] == SCIENCE_NODE)
+\t\t\t)
 \t\t\tif snap_a > MAX_SNAP or snap_b > MAX_SNAP:
 \t\t\t\tfailures.append("%s<->%s snap too far (%.1f / %.1f)" % [names[i], names[j], snap_a, snap_b])
 \t\t\telif path.size() < 2 or span < a.distance_to(b) * 0.4:
 \t\t\t\tfailures.append("%s<->%s no road path (points=%d span=%.1f)" % [names[i], names[j], path.size(), span])
+\t\t\telif is_science_arts and detour_ratio > MAX_SCIENCE_ARTS_DETOUR_RATIO:
+\t\t\t\tfailures.append(
+\t\t\t\t\t"Science<->ArtsEducation detour %.3f exceeds %.3f"
+\t\t\t\t\t% [detour_ratio, MAX_SCIENCE_ARTS_DETOUR_RATIO]
+\t\t\t\t)
+\t\t\telif detour_ratio > MAX_ANY_DETOUR_RATIO:
+\t\t\t\tfailures.append(
+\t\t\t\t\t"%s<->%s detour %.3f exceeds global limit %.3f"
+\t\t\t\t\t% [names[i], names[j], detour_ratio, MAX_ANY_DETOUR_RATIO]
+\t\t\t\t)
 \t\t\telse:
-\t\t\t\tprint("  %s -> %s : points=%d span=%.1f  OK" % [names[i], names[j], path.size(), span])
+\t\t\t\tprint(
+\t\t\t\t\t"  %s -> %s : points=%d span=%.1f length=%.1f ratio=%.3f  OK"
+\t\t\t\t\t% [names[i], names[j], path.size(), span, path_length, detour_ratio]
+\t\t\t\t)
 
+\tNavigationServer3D.free_rid(nav_rid)
+\tNavigationServer3D.free_rid(map)
 \troot.queue_free()
 \tawait process_frame
 \tif not failures.is_empty():
@@ -1209,6 +1236,13 @@ func _run() -> void:
 \t\treturn
 \tprint("CAMPUS ROADS NAV OK")
 \tquit(0)
+
+
+func _path_length(points: PackedVector3Array) -> float:
+\tvar total := 0.0
+\tfor index in range(1, points.size()):
+\t\ttotal += points[index - 1].distance_to(points[index])
+\treturn total
 
 
 func _entrances(buildings: Node) -> Dictionary:
