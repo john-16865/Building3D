@@ -44,6 +44,7 @@ DEFAULT_WIDTHS_M = {
     "steps": 2.0,
     "spur": 2.5,
     "connector": 3.0,
+    "underpass": 3.0,
     "default": 3.5,
 }
 # OSM highway class -> mesh material name (building3d.blender.materials).
@@ -55,6 +56,7 @@ HIGHWAY_MATERIAL = {
     "steps": "campus_steps",
     "spur": "campus_spur",
     "connector": "campus_connector",
+    "underpass": "campus_underpass",
 }
 
 
@@ -72,6 +74,7 @@ class CampusPathsConfig:
     entrance_spur_max_m: float = 60.0
     widths_m: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WIDTHS_M))
     extra_entrances: list[dict[str, Any]] = field(default_factory=list)
+    extra_edges: list[dict[str, Any]] = field(default_factory=list)
     delay: float = 0.03
     workers: int = 8
     campus_scene: str = "res://Scene/Campus/CampusMain.tscn"
@@ -111,6 +114,7 @@ def load_campus_paths_config(path: str | Path | None) -> CampusPathsConfig:
         entrance_spur_max_m=float(data.get("entrance_spur_max_m", 60.0)),
         widths_m=widths,
         extra_entrances=[dict(item) for item in data.get("extra_entrances", []) if isinstance(item, dict)],
+        extra_edges=[dict(item) for item in data.get("extra_edges", []) if isinstance(item, dict)],
         delay=float(data.get("delay", 0.03)),
         workers=int(data.get("workers", 8)),
         campus_scene=str(data.get("campus_scene", CampusPathsConfig.campus_scene)),
@@ -231,8 +235,14 @@ def extract_outdoor_segments(routes: list[dict[str, Any]]) -> tuple[list, list]:
         if not route or str(route.get("status")) != "OK":
             continue
         for r in route.get("routes", []):
+            # A MapsIndoors route commonly puts an outdoor section, an indoor
+            # passage, and the following outdoor section in three separate
+            # legs.  The continuity state therefore belongs to the whole
+            # route, not to an individual leg.  Resetting ``prev`` per leg
+            # silently discarded every such passage connector and forced the
+            # generated graph to take a long outdoor loop.
+            prev: tuple[float, float] | None = None
             for leg in r.get("legs", []):
-                prev: tuple[float, float] | None = None
                 for step in leg.get("steps", []):
                     geom = step.get("geometry") or []
                     pts = [(float(p["lng"]), float(p["lat"])) for p in geom if _z(p) == 0.0]
@@ -264,6 +274,42 @@ def _z(point: dict[str, Any]) -> float:
         return 0.0
 
 
+def extra_edge_segments(cfg: CampusPathsConfig) -> tuple[list, list]:
+    """Hand-authored edges from config, as lon/lat segments + highway classes.
+
+    MapsIndoors sampling can only ever see zLevel-0 outdoor geometry
+    (extract_outdoor_segments drops everything else), so below-grade passages
+    like the B331 Southern Underpass never enter the network by sampling.
+    Each config entry supplies a polyline either as ``points_lonlat``
+    ([[lon, lat], ...], the authority for geo-known structures) or as
+    ``points`` / ``points_placement`` ([[x, z], ...] in CampusMain placement
+    space, converted through the same reference calibration the rest of the
+    frame uses). The segments join the sampled ones BEFORE build_network so
+    snapping, stub pruning, and component bridging treat them uniformly.
+    """
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    highways: list[str] = []
+    for entry in cfg.extra_edges:
+        highway = str(entry.get("highway", "underpass")).strip() or "underpass"
+        raw_points = entry.get("points_lonlat")
+        if not isinstance(raw_points, list) or not raw_points:
+            placement_points = entry.get("points") or entry.get("points_placement") or []
+            raw_points = [
+                list(placement_to_lonlat(float(point[0]), float(point[1]), cfg.reference))
+                for point in placement_points
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            ]
+        points = [
+            (float(point[0]), float(point[1]))
+            for point in raw_points
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        for u, v in zip(points, points[1:]):
+            segments.append((u, v))
+            highways.append(highway)
+    return segments, highways
+
+
 # ---------------------------------------------------------------------------
 # graph build
 # ---------------------------------------------------------------------------
@@ -289,7 +335,9 @@ def build_network(segments: list, highways: list, cfg: CampusPathsConfig) -> dic
 
     # Priority so a shared edge keeps its most road-like class deterministically.
     # Connectors (indoor-gap bridges) are lowest, so any real class overrides them.
-    priority = {"residential": 4, "service": 3, "footway": 2, "path": 1, "steps": 1, "connector": 0}
+    # Hand-authored underpass edges outrank everything: they exist precisely
+    # because sampling cannot see them, so a sampled class must not repaint them.
+    priority = {"underpass": 5, "residential": 4, "service": 3, "footway": 2, "path": 1, "steps": 1, "connector": 0}
     edge_class: dict[tuple[int, int], str] = {}
     for (u, v), hwy in zip(segments, highways):
         a = node_id(*u)
@@ -697,6 +745,11 @@ def generate_campus_paths(
     print(f"routes OK: {ok}/{len(routes)}", flush=True)
 
     segments, highways = extract_outdoor_segments(routes)
+    extra_segments, extra_highways = extra_edge_segments(cfg)
+    if extra_segments:
+        segments = list(segments) + extra_segments
+        highways = list(highways) + extra_highways
+        print(f"extra edges: {len(extra_segments)} hand-authored segments", flush=True)
     graph = build_network(segments, highways, cfg)
     spur_stats = add_entrance_spurs(graph, entrances, cfg)
     meshes = graph_to_meshes(graph, cfg)
@@ -718,7 +771,8 @@ def generate_campus_paths(
     stats = {
         "routes_ok": ok,
         "routes_total": len(routes),
-        "raw_outdoor_segments": len(segments),
+        "raw_outdoor_segments": len(segments) - len(extra_segments),
+        "extra_edge_segments": len(extra_segments),
         "nodes": len(graph["nodes"]),
         "edges": len(graph["edges"]),
         "total_length_units": round(total_len, 1),
