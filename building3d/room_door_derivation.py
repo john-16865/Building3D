@@ -5,6 +5,12 @@ The heavy MapsIndoors route-geometry logic lives in
 its unit tests stay put). This module re-exports the reusable entry point under
 the ``building3d`` package so the automated pipeline can import it cleanly
 regardless of the current working directory.
+
+``tools`` is a regular package (see ``tools/__init__.py``) so that this import
+resolves to THIS repo's directory even when an unrelated ``tools`` package is
+installed in site-packages -- without that, a regular package there wins over a
+namespace one regardless of ``sys.path`` order and the whole pipeline fails to
+import.
 """
 from __future__ import annotations
 
