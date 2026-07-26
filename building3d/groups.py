@@ -62,10 +62,21 @@ ROUTE_NAV_TARGETED_POINT_CONNECTORS = {
     frozenset(("303S-400E4", "305-400C1")),
 }
 ROUTE_NAV_TARGETED_POINT_CONNECTOR_MAX_DISTANCE = 125.0
-ROUTE_NAV_CUSTOM_CONNECTOR_SEGMENTS_BY_FLOOR = {
-    # Building 302 floor 4: Godot's runtime nav graph truncates before the
-    # lower 302 office wing unless this known corridor gap is made explicit.
-    "4": [((20.5, 13.0), (4.031878, -27.795901))],
+# Hand-authored corridor connectors, scoped BY GROUP then by floor name.
+#
+# The group key is not optional. These segments are building-LOCAL coordinates
+# and they also feed `wall_bypass_geometry`, which switches off wall filtering
+# along the line. Keyed by floor name alone, the science connector below was
+# applied to all 15 buildings owning a floor called "4" and carved walkable
+# navmesh straight through their walls -- measured 19-32% of the polygons on
+# that line had a wall running through them, against 0-2% elsewhere on the
+# same floors.
+ROUTE_NAV_CUSTOM_CONNECTOR_SEGMENTS_BY_GROUP_FLOOR: dict[str, dict[str, list[tuple[tuple[float, float], tuple[float, float]]]]] = {
+    "science": {
+        # Building 302 floor 4: Godot's runtime nav graph truncates before the
+        # lower 302 office wing unless this known corridor gap is made explicit.
+        "4": [((20.5, 13.0), (4.031878, -27.795901))],
+    },
 }
 ROUTE_NAV_CUSTOM_CONNECTOR_RADIUS_MULTIPLIER = 1.5
 ROUTE_NAV_CUSTOM_CONNECTOR_PAD_MULTIPLIER = 2.0
@@ -629,6 +640,7 @@ def _complete_route_navigation_meshes(
         manifest.get("floors", []),
         origin_lon,
         origin_lat,
+        group_id=str((manifest.get("building") or {}).get("id") or ""),
         point_records=_route_navigation_point_records(manifest),
         walk_links=_route_navigation_walk_link_records(manifest),
         clip_footprints_by_floor=clip_footprints_by_floor,
@@ -772,6 +784,7 @@ def _route_navigation_meshes_with_stats_from_cache(
     origin_lon: float,
     origin_lat: float,
     *,
+    group_id: str | None = None,
     corridor_radius: float = ROUTE_NAV_CORRIDOR_RADIUS,
     point_records: list[dict[str, Any]] | None = None,
     walk_links: list[dict[str, Any]] | None = None,
@@ -899,7 +912,9 @@ def _route_navigation_meshes_with_stats_from_cache(
         targeted_connector_lines = list(targeted_connector_lines_by_floor.get(floor_name, []))
         custom_connector_lines = [
             LineString([(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))])
-            for start, end in ROUTE_NAV_CUSTOM_CONNECTOR_SEGMENTS_BY_FLOOR.get(floor_name, [])
+            for start, end in ROUTE_NAV_CUSTOM_CONNECTOR_SEGMENTS_BY_GROUP_FLOOR
+                .get(group_id or "", {})
+                .get(floor_name, [])
         ]
         custom_connector_geometries = [
             _custom_route_connector_geometry(line, corridor_radius)
