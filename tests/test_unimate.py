@@ -219,6 +219,87 @@ def test_write_unimate_scene_snaps_external_doors_to_floor_navmesh(tmp_path):
 
     assert '[node name="MainDoor" type="Node3D" parent="Floors/Floor0/Rooms"]' in text
     assert "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 0, 5)" in text
+    assert "metadata/campus_exit = true" in text
+    assert 'metadata/mapsindoors_external_id = "science_entry_001"' in text
+    assert "metadata/mapsindoors_anchor = Vector3(20, 0, 5)" in text
+    assert "metadata/mapsindoors_nav_snap_distance = 10" in text
+
+
+def test_write_unimate_scene_prefers_connected_external_door_navigation_anchor(tmp_path):
+    manifest = {
+        "building": {"id": "kenneth_myers", "display_name": "Kenneth Myers Centre"},
+        "floors": [{"floor_index": 0, "floor_name": "G", "height": 0.0}],
+        "rooms": [],
+        "portals": [],
+        "external_doors": [
+            {
+                "external_id": "kenneth_myers_entry_001",
+                "node_name": "MainDoor",
+                "floor_index": 0,
+                "anchor": [1.0, 0.0, 1.0],
+                "navigation_anchor": [5.0, 0.0, 1.0],
+                "navigation_anchor_source": "connected_navigation_component",
+            }
+        ],
+    }
+    nav_meshes = [
+        build_floor_slab(
+            "floor__G__interior",
+            [[5.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 5.0], [5.0, 0.0, 5.0], [5.0, 0.0, 0.0]],
+        ),
+        build_floor_slab(
+            "floor__G__exterior_stub",
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.0, 2.0], [0.0, 0.0, 2.0], [0.0, 0.0, 0.0]],
+        ),
+    ]
+
+    path = write_unimate_scene(
+        manifest,
+        tmp_path / "kenneth_myers_unimate.tscn",
+        navigation_meshes=nav_meshes,
+    )
+    text = path.read_text(encoding="utf-8")
+
+    assert '[node name="MainDoor" type="Node3D" parent="Floors/Floor0/Rooms"]' in text
+    assert "Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, 1)" in text
+    assert "metadata/mapsindoors_anchor = Vector3(1, 0, 1)" in text
+    assert "metadata/mapsindoors_nav_snap_distance = 4" in text
+    assert "metadata/indoor_navigation_anchor = Vector3(5, 0, 1)" in text
+    assert 'metadata/indoor_navigation_anchor_source = "connected_navigation_component"' in text
+
+
+def test_write_unimate_scene_rejects_external_door_far_from_building_navmesh(tmp_path):
+    manifest = {
+        "building": {"id": "science", "display_name": "Science Centre"},
+        "floors": [{"floor_index": 0, "floor_name": "G", "height": 0.0}],
+        "rooms": [],
+        "portals": [],
+        "external_doors": [
+            {
+                "external_id": "science_entry_bad",
+                "node_name": "BadDoor",
+                "floor_index": 0,
+                "anchor": [100.0, 0.0, 5.0],
+            }
+        ],
+    }
+    nav_meshes = [
+        build_floor_slab(
+            "floor__G",
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 10.0], [0.0, 0.0, 10.0], [0.0, 0.0, 0.0]],
+        )
+    ]
+
+    try:
+        write_unimate_scene(
+            manifest,
+            tmp_path / "science_unimate.tscn",
+            navigation_meshes=nav_meshes,
+        )
+    except ValueError as exc:
+        assert "intermediate-building route transition" in str(exc)
+    else:
+        raise AssertionError("Expected a far external door to be rejected")
 
 
 def test_write_unimate_scene_errors_when_floor_with_records_has_no_navmesh_source(tmp_path):

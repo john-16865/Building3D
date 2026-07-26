@@ -25,6 +25,18 @@
     "lat": -36.84840305,
     "logical_building_id": "law_annex",
     "lon": 174.77202590000002,
+    "navigation_anchor": [
+      5.0,
+      0.0,
+      16.481025
+    ],
+    "navigation_anchor_component_index": 0,
+    "navigation_anchor_component_reason": "vertical_network_component",
+    "navigation_anchor_confidence": "high",
+    "navigation_anchor_distance": 0.280326,
+    "navigation_anchor_relocated": true,
+    "navigation_anchor_source": "connected_navigation_component",
+    "navigation_anchor_source_component_index": 9,
     "node_name": "MainDoor",
     "source": "manual_street_frontage_eden_crescent",
     "source_building_admin_id": "803",

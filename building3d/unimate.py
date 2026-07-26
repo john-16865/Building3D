@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from pathlib import Path
@@ -10,6 +11,7 @@ from building3d.gltf import triangulate_faces
 
 _NAV_PRIMARY_MATERIALS = {"floor"}
 _NAV_FALLBACK_EXCLUDED_MATERIALS = {"wall", "wall_low", "anchor"}
+_MAX_EXTERNAL_DOOR_NAV_SNAP_DISTANCE = 30.0
 
 
 def room_node_name(external_id: str, display_name: str = "") -> str:
@@ -167,13 +169,38 @@ def write_unimate_scene(
             portals_by_floor.get(floor_index, []),
             external_doors_by_floor.get(floor_index, []),
         )
-        for record, should_snap in sorted(floor_records, key=lambda item: _record_sort_key(item[0])):
+        for record, should_snap, is_external_door in sorted(
+            floor_records,
+            key=lambda item: _record_sort_key(item[0]),
+        ):
             node_name = str(record.get("node_name") or record.get("external_id") or "Room")
             anchor = record.get("anchor")
             if not _valid_anchor(anchor):
                 continue
+            source_anchor = [float(anchor[0]), float(anchor[1]), float(anchor[2])]
+            requested_navigation_anchor = (
+                record.get("navigation_anchor")
+                if is_external_door and _valid_anchor(record.get("navigation_anchor"))
+                else anchor
+            )
+            anchor = requested_navigation_anchor
+            nav_snap_distance = 0.0
             if should_snap:
                 anchor = _snap_anchor_to_navigation_mesh(anchor, nav_resource)
+                nav_snap_distance = math.hypot(
+                    float(anchor[0]) - source_anchor[0],
+                    float(anchor[2]) - source_anchor[2],
+                )
+            if (
+                is_external_door
+                and nav_snap_distance > _MAX_EXTERNAL_DOOR_NAV_SNAP_DISTANCE
+            ):
+                raise ValueError(
+                    f"External door '{node_name}' is {nav_snap_distance:.2f} m "
+                    "from the building navigation mesh. This is usually an "
+                    "intermediate-building route transition, not an entrance "
+                    "to this building."
+                )
             node_parent = f"{floor_parent}/Rooms"
             node_path = f"{node_parent}/{_quote_attr(node_name)}"
             lines.extend(
@@ -183,6 +210,29 @@ def write_unimate_scene(
                     f"transform = {_transform(float(anchor[0]), 0.0, float(anchor[2]))}",
                 ]
             )
+            if is_external_door:
+                mapsindoors_external_id = str(
+                    record.get("source_external_id")
+                    or record.get("external_id")
+                    or ""
+                )
+                mapsindoors_source_id = str(
+                    record.get("source_id")
+                    or record.get("source_entry_id")
+                    or mapsindoors_external_id
+                )
+                lines.extend(
+                    [
+                        "metadata/campus_exit = true",
+                        f'metadata/mapsindoors_external_id = "{_quote_attr(mapsindoors_external_id)}"',
+                        f'metadata/mapsindoors_source_id = "{_quote_attr(mapsindoors_source_id)}"',
+                        f"metadata/mapsindoors_anchor = {_vector3(source_anchor)}",
+                        f"metadata/mapsindoors_nav_snap_distance = {_fmt(nav_snap_distance)}",
+                        "metadata/indoor_navigation_anchor = %s" % _vector3(anchor),
+                        'metadata/indoor_navigation_anchor_source = "%s"'
+                        % _quote_attr(str(record.get("navigation_anchor_source") or "nearest_navigation_mesh")),
+                    ]
+                )
             navigation_offset = _navigation_target_offset(record, anchor, fallback_to_anchor=not should_snap)
             if navigation_offset is not None:
                 lines.extend(
@@ -322,11 +372,11 @@ def _scene_records_for_floor(
     rooms: list[dict[str, Any]],
     portals: list[dict[str, Any]],
     external_doors: list[dict[str, Any]],
-) -> list[tuple[dict[str, Any], bool]]:
+) -> list[tuple[dict[str, Any], bool, bool]]:
     return [
-        *((record, False) for record in rooms),
-        *((record, True) for record in portals),
-        *((record, True) for record in external_doors),
+        *((record, False, False) for record in rooms),
+        *((record, True, False) for record in portals),
+        *((record, True, True) for record in external_doors),
     ]
 
 

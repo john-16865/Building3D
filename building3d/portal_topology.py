@@ -40,6 +40,11 @@ def build_portal_topology(
     vertical_edges = _vertical_edges(manifest, terminals_by_key)
     public_terminals = _public_terminals(terminals)
     validation_source_hash = source_hash or _source_hash(manifest, route_navigation_meshes)
+    external_door_health = _external_door_graph_health(
+        terminals,
+        same_floor_transfer_edges,
+        vertical_edges,
+    )
 
     validation = {
         "building_id": building_id,
@@ -53,6 +58,7 @@ def build_portal_topology(
         "transfer_edge_reason_counts": _edge_reason_counts(same_floor_transfer_edges),
         "route_component_floor_count": len(components_by_floor),
         "route_component_count": sum(len(components) for components in components_by_floor.values()),
+        **external_door_health,
     }
 
     return {
@@ -84,7 +90,11 @@ def _topology_terminals(
     ]
     base_terminals: list[dict[str, Any]] = []
     for collection_name, record in records:
-        anchor = record.get("anchor")
+        anchor = (
+            record.get("navigation_anchor")
+            if collection_name == "external_door" and _valid_anchor(record.get("navigation_anchor"))
+            else record.get("anchor")
+        )
         if not _valid_anchor(anchor):
             continue
         # Ungrouped verticals are judged on the RAW group id: the member-scoped
@@ -108,6 +118,8 @@ def _topology_terminals(
             "_external_id": str(record.get("external_id") or record.get("entry_id") or ""),
             "_source_id": str(record.get("source_id") or record.get("entry_id") or record.get("external_id") or ""),
         }
+        if collection_name == "external_door":
+            terminal["terminal_role"] = "external_door"
         terminal["id"] = _terminal_id(terminal)
         base_terminals.append(terminal)
 
@@ -127,6 +139,72 @@ def _public_terminals(terminals: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {key: value for key, value in terminal.items() if not key.startswith("_")}
         for terminal in terminals
     ]
+
+
+def _external_door_graph_health(
+    terminals: list[dict[str, Any]],
+    transfer_edges: list[dict[str, Any]],
+    vertical_edges: list[dict[str, Any]],
+) -> dict[str, Any]:
+    external_door_ids = [
+        str(terminal.get("id", ""))
+        for terminal in terminals
+        if str(terminal.get("terminal_role", "")) == "external_door"
+    ]
+    vertical_terminal_ids = {
+        str(terminal.get("id", ""))
+        for terminal in terminals
+        if str(terminal.get("portal_type", "")) in {"lift", "stair"}
+    }
+    adjacency: dict[str, list[str]] = {
+        str(terminal.get("id", "")): []
+        for terminal in terminals
+    }
+    for edge in [*transfer_edges, *vertical_edges]:
+        start = str(edge.get("from", ""))
+        end = str(edge.get("to", ""))
+        if start in adjacency and end:
+            adjacency[start].append(end)
+
+    records = []
+    routable_ids = []
+    unreachable_ids = []
+    for door_id in external_door_ids:
+        queue = [door_id]
+        seen = {door_id}
+        reached_vertical_ids: list[str] = []
+        while queue:
+            current = queue.pop(0)
+            if current in vertical_terminal_ids:
+                reached_vertical_ids.append(current)
+            for next_id in adjacency.get(current, []):
+                if next_id in seen:
+                    continue
+                seen.add(next_id)
+                queue.append(next_id)
+        routable = bool(reached_vertical_ids) or not vertical_edges
+        if routable:
+            routable_ids.append(door_id)
+        else:
+            unreachable_ids.append(door_id)
+        records.append(
+            {
+                "terminal_id": door_id,
+                "out_degree": len(adjacency.get(door_id, [])),
+                "reachable_terminal_count": len(seen),
+                "reachable_vertical_terminal_count": len(reached_vertical_ids),
+                "routable_to_vertical_network": routable,
+            }
+        )
+
+    return {
+        "external_door_terminal_count": len(external_door_ids),
+        "routable_external_door_count": len(routable_ids),
+        "unreachable_external_door_count": len(unreachable_ids),
+        "routable_external_door_ids": routable_ids,
+        "unreachable_external_door_ids": unreachable_ids,
+        "external_door_health": records,
+    }
 
 
 def _same_floor_transfer_edges(

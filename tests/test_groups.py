@@ -90,6 +90,99 @@ def test_generate_group_builds_science_package_with_unimate_scene(tmp_path):
     assert json.loads((export_dir / "external_doors.json").read_text(encoding="utf-8"))[0]["node_name"] == "MainDoor"
 
 
+def test_external_door_navigation_anchor_moves_off_isolated_exterior_component():
+    manifest = {
+        "building": {"id": "kenneth_myers"},
+        "floors": [
+            {"floor_index": 0, "floor_name": "G", "height": 0.0},
+            {"floor_index": 1, "floor_name": "1", "height": 4.2},
+        ],
+        "rooms": [
+            {
+                "external_id": "820-101",
+                "floor_index": 0,
+                "floor_name": "G",
+                "anchor": [8.0, 0.0, 5.0],
+            }
+        ],
+        "portals": [
+            {
+                "external_id": "820-100E1",
+                "node_name": "820 100E1_Elevator_Set820E1",
+                "floor_index": 0,
+                "floor_name": "G",
+                "kind": "elevator",
+                "anchor": [6.0, 0.0, 1.0],
+            },
+            {
+                "external_id": "820-200E1",
+                "node_name": "820 200E1_Elevator_Set820E1",
+                "floor_index": 1,
+                "floor_name": "1",
+                "kind": "elevator",
+                "anchor": [6.0, 4.2, 1.0],
+            },
+        ],
+        "external_doors": [
+            {
+                "external_id": "kenneth_myers_entry_001",
+                "entry_id": "kenneth_myers_entry_001",
+                "node_name": "MainDoor",
+                "floor_index": 0,
+                "floor_name": "G",
+                "kind": "door",
+                "anchor": [1.0, 0.0, 1.0],
+            }
+        ],
+        "nav": {"links": []},
+    }
+    navigation_meshes = [
+        groups.MeshData(
+            name="floor__G__interior",
+            vertices=[
+                [5.0, 0.0, 0.0],
+                [15.0, 0.0, 0.0],
+                [15.0, 0.0, 10.0],
+                [5.0, 0.0, 10.0],
+            ],
+            faces=[[0, 1, 2, 3]],
+            material="floor",
+        ),
+        groups.MeshData(
+            name="floor__G__exterior_stub",
+            vertices=[
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, 2.0],
+                [0.0, 0.0, 2.0],
+            ],
+            faces=[[0, 1, 2, 3]],
+            material="floor",
+        ),
+    ]
+
+    diagnostics = groups._assign_external_door_navigation_anchors(
+        manifest,
+        navigation_meshes,
+    )
+
+    door = manifest["external_doors"][0]
+    assert door["anchor"] == [1.0, 0.0, 1.0]
+    assert door["navigation_anchor"] == [5.0, 0.0, 1.0]
+    assert door["navigation_anchor_relocated"] is True
+    assert door["navigation_anchor_component_reason"] == "vertical_network_component"
+    assert diagnostics["ok"] is True
+    assert diagnostics["relocated_count"] == 1
+    assert diagnostics["records"][0]["component_changed"] is True
+
+    route_door = next(
+        record
+        for record in groups._route_navigation_point_records(manifest)
+        if record["kind"] == "door"
+    )
+    assert route_door["anchor"] == [5.0, 0.0, 1.0]
+
+
 def test_external_door_ids_are_normalized_to_group_id():
     group = BuildingGroupConfig(
         id="business",
@@ -1780,10 +1873,14 @@ def test_route_navigation_grid_merges_straight_corridors_for_stable_godot_querie
     meshes = _route_navigation_meshes_from_cache(route_cache_dir, floors, origin_lon, origin_lat)
     resources = _navigation_mesh_resources(meshes, floors, {0})
     resource_polygon_count = len(resources[0]["polygons"])
+    source_grid_cells = sum(int(mesh.metadata.get("source_grid_cells", 0)) for mesh in meshes)
 
     assert _mesh_coverage_component_count(meshes) == 1
     assert _nav_resource_edge_component_count(resources[0]) == 1
-    assert resource_polygon_count < 7000
+    assert source_grid_cells > 500
+    assert resource_polygon_count < 50
+    assert resource_polygon_count < source_grid_cells / 10
+    assert {mesh.metadata.get("route_nav_meshing") for mesh in meshes} == {"constrained_delaunay"}
 
 
 def test_route_anchor_envelope_exports_edge_connected_godot_nav_grid():

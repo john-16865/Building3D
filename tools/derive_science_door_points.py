@@ -682,6 +682,7 @@ def _entry_targets(dataset: dict[str, Any], per_member: int) -> list[dict[str, A
 def _outside_to_inside_points(route: dict[str, Any]) -> list[RoutePoint]:
     points: list[RoutePoint] = []
     previous_abutters = ""
+    final_abutters = ""
     for leg in route.get("legs", []):
         for step in leg.get("steps", []):
             abutters = str(step.get("abutters") or "")
@@ -696,7 +697,19 @@ def _outside_to_inside_points(route: dict[str, Any]) -> list[RoutePoint]:
                     )
                 )
             previous_abutters = abutters
-    return points
+            if abutters:
+                final_abutters = abutters
+
+    # A route to a room can pass through other campus buildings before it
+    # reaches the destination.  Every outside->inside transition used to be
+    # labelled as an entrance to the target building, which produced doors
+    # hundreds of metres outside that building; scene export then silently
+    # snapped those false doors onto an unrelated wall.  Only the final
+    # transition is the destination entrance, and it is valid only when the
+    # route actually finishes inside a building.
+    if final_abutters != "InsideBuilding" or not points:
+        return []
+    return [points[-1]]
 
 
 def _cluster_entry_observations(observations: list[dict[str, Any]], radius_m: float = 1.2, entry_prefix: str = "science") -> list[dict[str, Any]]:

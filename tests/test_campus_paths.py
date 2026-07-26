@@ -157,6 +157,24 @@ def _multistep_route(steps):
     }
 
 
+def _step(abutters, points, highway="footway"):
+    return {
+        "abutters": abutters,
+        "highway": highway,
+        "geometry": [
+            {"lng": p[0], "lat": p[1], "zLevel": 0.0, "floor_name": "0"}
+            for p in points
+        ],
+    }
+
+
+def _route_with_legs(legs):
+    return {
+        "status": "OK",
+        "routes": [{"legs": [{"steps": steps} for steps in legs]}],
+    }
+
+
 def test_extract_bridges_indoor_gap_within_a_leg():
     # One leg: outdoor -> indoor -> outdoor. The indoor stretch must not just be
     # dropped (that shatters the route); it becomes one connector spanning it.
@@ -170,6 +188,25 @@ def test_extract_bridges_indoor_gap_within_a_leg():
     assert highways.count("connector") == 1
     conn = segments[highways.index("connector")]
     assert conn == ((0.001, 0.0), (0.002, 0.0))  # spans exactly the indoor step
+
+
+def test_extract_bridges_indoor_gap_across_route_legs():
+    # MapsIndoors normally splits an outdoor -> indoor -> outdoor route into
+    # separate legs.  Continuity must survive those leg boundaries or the
+    # indoor public passage disappears from the generated navigation graph.
+    route = _route_with_legs(
+        [
+            [_step("OutsideOnVenue", [(0.0, 0.0), (0.001, 0.0)])],
+            [_step("InsideBuilding", [(0.001, 0.0), (0.002, 0.0)])],
+            [_step("OutsideOnVenue", [(0.002, 0.0), (0.003, 0.0)])],
+        ]
+    )
+
+    segments, highways = extract_outdoor_segments([route])
+
+    assert highways.count("connector") == 1
+    conn = segments[highways.index("connector")]
+    assert conn == ((0.001, 0.0), (0.002, 0.0))
 
 
 def test_extract_drops_trailing_indoor_stretch_without_connector():
@@ -234,3 +271,64 @@ extra_entrances:
     assert cfg.road_y == 0.5
     assert cfg.widths_m["residential"] == 7.0
     assert cfg.extra_entrances[0]["building_id"] == "kate"
+
+
+def test_extra_edge_segments_from_lonlat_and_placement_points():
+    from building3d.campus_paths import extra_edge_segments
+
+    cfg_lonlat = CampusPathsConfig(extra_edges=[{
+        "highway": "underpass",
+        "points_lonlat": [[174.7693511, -36.8525145], [174.7695195, -36.8529999]],
+    }])
+    segments, highways = extra_edge_segments(cfg_lonlat)
+    assert highways == ["underpass"]
+    assert segments[0][0] == (174.7693511, -36.8525145)
+    assert segments[0][1] == (174.7695195, -36.8529999)
+
+    # Placement-space points convert through the same reference the frame uses:
+    # project(placement_to_lonlat(p)) must land back on p.
+    ref = CampusPathsConfig().reference
+    placement_start = [-104.3, 815.8]
+    cfg_placement = CampusPathsConfig(extra_edges=[{
+        "points": [placement_start, [-97.6, 839.9]],
+    }])
+    segments_p, highways_p = extra_edge_segments(cfg_placement)
+    assert highways_p == ["underpass"]  # class defaults to underpass
+    x, z = project_to_campus(segments_p[0][0][0], segments_p[0][0][1], ref)
+    assert math.isclose(x, placement_start[0], abs_tol=1e-6)
+    assert math.isclose(z, placement_start[1], abs_tol=1e-6)
+
+
+def test_extra_edges_join_network_bridged_with_class_and_material():
+    from building3d.campus_paths import extra_edge_segments
+
+    cfg = CampusPathsConfig(extra_edges=[{
+        "highway": "underpass",
+        "points_lonlat": [[174.7693511, -36.8525145], [174.7695195, -36.8529999]],
+    }])
+    # Sampled network far from the tunnel -> the tunnel starts as an island.
+    routes = [_route([(174.7670, -36.8520), (174.7680, -36.8530)])]
+    segments, highways = extract_outdoor_segments(routes)
+    extra_segments, extra_highways = extra_edge_segments(cfg)
+    graph = build_network(segments + extra_segments, highways + extra_highways, cfg)
+    # Bridged into one component; the hand edge keeps its class (56 m is far
+    # above the stub-prune floor, so degree-1 endpoints do not delete it).
+    assert len(_connected_components(graph)) == 1
+    assert any(e["highway"] == "underpass" for e in graph["edges"])
+    materials = {m.material for m in graph_to_meshes(graph, cfg)}
+    assert "campus_underpass" in materials
+
+
+def test_load_config_parses_extra_edges(tmp_path):
+    yaml_text = """
+extra_edges:
+  - highway: underpass
+    points_lonlat: [[174.7693511, -36.8525145], [174.7695195, -36.8529999]]
+"""
+    path = tmp_path / "campus_paths_extra.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+    cfg = load_campus_paths_config(path)
+    assert cfg.extra_edges == [{
+        "highway": "underpass",
+        "points_lonlat": [[174.7693511, -36.8525145], [174.7695195, -36.8529999]],
+    }]

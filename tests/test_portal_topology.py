@@ -70,6 +70,55 @@ def test_portal_topology_does_not_emit_same_floor_edges_without_component_proof(
     assert topology["validation"]["same_floor_transfer_edge_count"] == 0
 
 
+def test_portal_topology_uses_external_door_navigation_anchor_and_reports_health():
+    manifest = _external_door_health_manifest(with_navigation_anchor=True)
+    route_meshes = [
+        _route_polygon("G", [(5.0, 0.0), (15.0, 0.0), (15.0, 10.0), (5.0, 10.0)], height=0.0),
+        _route_polygon("1", [(5.0, 0.0), (15.0, 0.0), (15.0, 10.0), (5.0, 10.0)], height=4.2),
+        _route_polygon("G", [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)], height=0.0),
+    ]
+
+    topology = build_portal_topology(
+        manifest,
+        route_meshes,
+        generated_at="2026-07-25T00:00:00Z",
+    )
+
+    door = next(
+        terminal
+        for terminal in topology["terminals"]
+        if terminal.get("terminal_role") == "external_door"
+    )
+    assert door["position_local"] == [5.0, 0.0, 1.0]
+    assert topology["validation"]["external_door_terminal_count"] == 1
+    assert topology["validation"]["routable_external_door_count"] == 1
+    assert topology["validation"]["unreachable_external_door_count"] == 0
+    assert topology["validation"]["external_door_health"][0]["out_degree"] > 0
+    assert topology["validation"]["external_door_health"][0]["routable_to_vertical_network"] is True
+
+
+def test_portal_topology_reports_isolated_external_door_instead_of_blaming_rooms():
+    manifest = _external_door_health_manifest(with_navigation_anchor=False)
+    route_meshes = [
+        _route_polygon("G", [(5.0, 0.0), (15.0, 0.0), (15.0, 10.0), (5.0, 10.0)], height=0.0),
+        _route_polygon("1", [(5.0, 0.0), (15.0, 0.0), (15.0, 10.0), (5.0, 10.0)], height=4.2),
+        _route_polygon("G", [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)], height=0.0),
+    ]
+
+    topology = build_portal_topology(
+        manifest,
+        route_meshes,
+        generated_at="2026-07-25T00:00:00Z",
+    )
+
+    validation = topology["validation"]
+    assert validation["external_door_terminal_count"] == 1
+    assert validation["routable_external_door_count"] == 0
+    assert validation["unreachable_external_door_count"] == 1
+    assert validation["external_door_health"][0]["out_degree"] == 0
+    assert validation["external_door_health"][0]["routable_to_vertical_network"] is False
+
+
 def test_portal_topology_skips_ungrouped_vertical_markers_godot_does_not_scan():
     manifest = _science_manifest()
     manifest["portals"].append(
@@ -187,6 +236,75 @@ def _science_manifest():
                     "to_floor_index": 11,
                     "from_anchor": [5.0, 33.6, 0.0],
                     "to_anchor": [5.0, 35.7, 0.0],
+                    "bidirectional": True,
+                }
+            ]
+        },
+    }
+
+
+def _external_door_health_manifest(*, with_navigation_anchor: bool):
+    door = {
+        "external_id": "kenneth_myers_entry_001",
+        "source_id": "kenneth_myers_entry_001",
+        "node_name": "MainDoor",
+        "floor_index": 0,
+        "floor_name": "G",
+        "kind": "door",
+        "anchor": [1.0, 0.0, 1.0],
+        "source_building_admin_id": "820",
+    }
+    if with_navigation_anchor:
+        door["navigation_anchor"] = [5.0, 0.0, 1.0]
+    return {
+        "schema_version": 2,
+        "building": {"id": "kenneth_myers"},
+        "floors": [
+            {"floor_index": 0, "floor_name": "G", "height": 0.0},
+            {"floor_index": 1, "floor_name": "1", "height": 4.2},
+        ],
+        "rooms": [],
+        "portals": [
+            {
+                "external_id": "820-100E1",
+                "source_id": "feature-820-100E1",
+                "node_name": "820 100E1_Elevator_Set820E1",
+                "floor_index": 0,
+                "floor_name": "G",
+                "kind": "elevator",
+                "group_id": "E1",
+                "anchor": [6.0, 0.0, 1.0],
+                "source_building_admin_id": "820",
+            },
+            {
+                "external_id": "820-200E1",
+                "source_id": "feature-820-200E1",
+                "node_name": "820 200E1_Elevator_Set820E1",
+                "floor_index": 1,
+                "floor_name": "1",
+                "kind": "elevator",
+                "group_id": "E1",
+                "anchor": [6.0, 4.2, 1.0],
+                "source_building_admin_id": "820",
+            },
+        ],
+        "external_doors": [door],
+        "nav": {
+            "links": [
+                {
+                    "kind": "elevator",
+                    "group_id": "E1",
+                    "source_building_admin_id": "820",
+                    "from_source_id": "feature-820-100E1",
+                    "to_source_id": "feature-820-200E1",
+                    "from_external_id": "820-100E1",
+                    "to_external_id": "820-200E1",
+                    "from_node_name": "820 100E1_Elevator_Set820E1",
+                    "to_node_name": "820 200E1_Elevator_Set820E1",
+                    "from_floor_index": 0,
+                    "to_floor_index": 1,
+                    "from_anchor": [6.0, 0.0, 1.0],
+                    "to_anchor": [6.0, 4.2, 1.0],
                     "bidirectional": True,
                 }
             ]

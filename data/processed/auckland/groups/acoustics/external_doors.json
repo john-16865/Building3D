@@ -25,6 +25,18 @@
     "lat": -36.85404185,
     "logical_building_id": "acoustics",
     "lon": 174.76988625,
+    "navigation_anchor": [
+      -7.815632,
+      0.0,
+      -11.0
+    ],
+    "navigation_anchor_component_index": 1,
+    "navigation_anchor_component_reason": "vertical_network_component",
+    "navigation_anchor_confidence": "high",
+    "navigation_anchor_distance": 0.222075,
+    "navigation_anchor_relocated": true,
+    "navigation_anchor_source": "connected_navigation_component",
+    "navigation_anchor_source_component_index": 1,
     "node_name": "MainDoor",
     "source": "manual_courtyard_facing_main_architecture",
     "source_building_admin_id": "422",

@@ -36,6 +36,26 @@ widths_m:
   # Indoor-gap bridges that keep a building-to-building route connected where
   # MapsIndoors passes through a building. Kept narrow and muted.
   connector: 3.0
+  # Hand-authored below-grade passages (extra_edges). Slightly wider than a
+  # footway so the ribbon reads clearly under the context prop above it.
+  underpass: 3.5
+
+# Hand-authored edges the MapsIndoors sampler can never see: sampling keeps
+# only zLevel-0 outdoor geometry, so below-grade passages are invisible to it.
+# points_lonlat is the authority for geo-known structures; points (placement
+# space) also accepted. Segments join the sampled set BEFORE build_network, so
+# snapping/pruning/component-bridging treat them like any sampled road.
+extra_edges:
+  # B331 "Southern Underpass": the pedestrian tunnel between the Engineering
+  # blocks (401/402 level 3) and the Kate Edger / Hiwa lower concourse
+  # (315 level 0, 310 level -1). Mouths from MapsIndoors B331 footprint;
+  # OSM way/26805204 carries the same name and alignment. The campus frame is
+  # flat, so the tunnel is modelled at road level passing under the B331
+  # context prop.
+  - highway: underpass
+    points_lonlat:
+      - [174.7693511, -36.8525145]   # north mouth (Kate Edger / Hiwa terrace)
+      - [174.7695195, -36.8529999]   # south mouth (Engineering L3 courtyard)
 
 # Max entrance->nearest-road spur length (metres) before an entrance is left
 # unconnected (reported in stats). Set to reach the most set-back building:
@@ -59,6 +79,17 @@ extra_entrances:
   - building_id: kate
     x: -60.2
     z: 715.5
+  # Southern Underpass doors (keep AFTER the main entrances: the first entry
+  # per building stays the primary for pair sampling/building_routes).
+  # Computed from the live CampusMain node transforms:
+  #   kate Floors/Floor0/Rooms/Door  -> 11 m from the tunnel's north mouth
+  #   engineering Floors/Floor3/Rooms/Door -> 29 m from the south mouth
+  - building_id: kate
+    x: -90.19
+    z: 772.68
+  - building_id: engineering
+    x: -59.07
+    z: 851.99
 
 # CampusMain integration targets.
 campus_scene: res://Scene/Campus/CampusMain.tscn
